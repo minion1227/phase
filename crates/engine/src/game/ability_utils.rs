@@ -769,6 +769,7 @@ fn collect_target_slots(
         }
     }
     if defers_sub_ability_target_selection(&ability.effect) {
+        collect_target_slots_after_deferred_effect(state, ability.sub_ability.as_deref(), slots)?;
         return Ok(());
     }
     if let Some(sub_ability) = ability.sub_ability.as_deref() {
@@ -988,6 +989,11 @@ fn collect_target_slot_specs(
         }
     }
     if defers_sub_ability_target_selection(&ability.effect) {
+        collect_target_slot_specs_after_deferred_effect(
+            state,
+            ability.sub_ability.as_deref(),
+            specs,
+        );
         return;
     }
     if let Some(sub_ability) = ability.sub_ability.as_deref() {
@@ -1226,6 +1232,53 @@ fn defers_sub_ability_target_selection(effect: &Effect) -> bool {
             | Effect::RevealHand { .. }
             | Effect::Choose { .. }
     )
+}
+
+fn skips_stack_targets_after_deferred_effect(effect: &Effect) -> bool {
+    matches!(effect, Effect::ChangeZone { .. } | Effect::Shuffle { .. })
+}
+
+fn collect_target_slots_after_deferred_effect(
+    state: &GameState,
+    sub_ability: Option<&ResolvedAbility>,
+    slots: &mut Vec<TargetSelectionSlot>,
+) -> Result<(), EngineError> {
+    let Some(sub_ability) = sub_ability else {
+        return Ok(());
+    };
+    if defers_conditional_target_selection(sub_ability) {
+        return Ok(());
+    }
+    if skips_stack_targets_after_deferred_effect(&sub_ability.effect) {
+        return collect_target_slots_after_deferred_effect(
+            state,
+            sub_ability.sub_ability.as_deref(),
+            slots,
+        );
+    }
+    collect_target_slots(state, sub_ability, slots)
+}
+
+fn collect_target_slot_specs_after_deferred_effect(
+    state: &GameState,
+    sub_ability: Option<&ResolvedAbility>,
+    specs: &mut Vec<TargetSlotSpec>,
+) {
+    let Some(sub_ability) = sub_ability else {
+        return;
+    };
+    if defers_conditional_target_selection(sub_ability) {
+        return;
+    }
+    if skips_stack_targets_after_deferred_effect(&sub_ability.effect) {
+        collect_target_slot_specs_after_deferred_effect(
+            state,
+            sub_ability.sub_ability.as_deref(),
+            specs,
+        );
+        return;
+    }
+    collect_target_slot_specs(state, sub_ability, specs);
 }
 
 fn build_target_assignments(
@@ -1787,6 +1840,12 @@ fn assign_targets_recursive(
             }
         }
         if defers_sub_ability_target_selection(&ability.effect) {
+            assign_targets_after_deferred_effect(
+                state,
+                ability.sub_ability.as_deref_mut(),
+                targets,
+                next_target,
+            )?;
             return Ok(());
         }
         if let Some(sub_ability) = ability.sub_ability.as_mut() {
@@ -1812,6 +1871,12 @@ fn assign_targets_recursive(
             }
         }
         if defers_sub_ability_target_selection(&ability.effect) {
+            assign_targets_after_deferred_effect(
+                state,
+                ability.sub_ability.as_deref_mut(),
+                targets,
+                next_target,
+            )?;
             return Ok(());
         }
         if let Some(sub_ability) = ability.sub_ability.as_mut() {
@@ -1882,6 +1947,12 @@ fn assign_targets_recursive(
         }
     }
     if defers_sub_ability_target_selection(&ability.effect) {
+        assign_targets_after_deferred_effect(
+            state,
+            ability.sub_ability.as_deref_mut(),
+            targets,
+            next_target,
+        )?;
         return Ok(());
     }
     if let Some(sub_ability) = ability.sub_ability.as_mut() {
@@ -1932,6 +2003,11 @@ fn assign_selected_slots_recursive(
             }
         }
         if defers_sub_ability_target_selection(&ability.effect) {
+            assign_selected_slots_after_deferred_effect(
+                ability.sub_ability.as_deref_mut(),
+                selected_slots,
+                next_slot,
+            )?;
             return Ok(());
         }
         if let Some(sub_ability) = ability.sub_ability.as_mut() {
@@ -1964,6 +2040,11 @@ fn assign_selected_slots_recursive(
             }
         }
         if defers_sub_ability_target_selection(&ability.effect) {
+            assign_selected_slots_after_deferred_effect(
+                ability.sub_ability.as_deref_mut(),
+                selected_slots,
+                next_slot,
+            )?;
             return Ok(());
         }
         if let Some(sub_ability) = ability.sub_ability.as_mut() {
@@ -2041,6 +2122,11 @@ fn assign_selected_slots_recursive(
         }
     }
     if defers_sub_ability_target_selection(&ability.effect) {
+        assign_selected_slots_after_deferred_effect(
+            ability.sub_ability.as_deref_mut(),
+            selected_slots,
+            next_slot,
+        )?;
         return Ok(());
     }
     if let Some(sub_ability) = ability.sub_ability.as_mut() {
@@ -2050,6 +2136,50 @@ fn assign_selected_slots_recursive(
         assign_selected_slots_recursive(sub_ability, selected_slots, next_slot)?;
     }
     Ok(())
+}
+
+fn assign_targets_after_deferred_effect(
+    state: &GameState,
+    sub_ability: Option<&mut ResolvedAbility>,
+    targets: &[TargetRef],
+    next_target: &mut usize,
+) -> Result<(), EngineError> {
+    let Some(sub_ability) = sub_ability else {
+        return Ok(());
+    };
+    if defers_conditional_target_selection(sub_ability) {
+        return Ok(());
+    }
+    if skips_stack_targets_after_deferred_effect(&sub_ability.effect) {
+        return assign_targets_after_deferred_effect(
+            state,
+            sub_ability.sub_ability.as_deref_mut(),
+            targets,
+            next_target,
+        );
+    }
+    assign_targets_recursive(state, sub_ability, targets, next_target)
+}
+
+fn assign_selected_slots_after_deferred_effect(
+    sub_ability: Option<&mut ResolvedAbility>,
+    selected_slots: &[Option<TargetRef>],
+    next_slot: &mut usize,
+) -> Result<(), EngineError> {
+    let Some(sub_ability) = sub_ability else {
+        return Ok(());
+    };
+    if defers_conditional_target_selection(sub_ability) {
+        return Ok(());
+    }
+    if skips_stack_targets_after_deferred_effect(&sub_ability.effect) {
+        return assign_selected_slots_after_deferred_effect(
+            sub_ability.sub_ability.as_deref_mut(),
+            selected_slots,
+            next_slot,
+        );
+    }
+    assign_selected_slots_recursive(sub_ability, selected_slots, next_slot)
 }
 
 /// CR 115.3: Validate targeting constraints — e.g., different target players must be distinct.
@@ -2108,12 +2238,25 @@ fn chain_has_target_sink(ability: &ResolvedAbility) -> bool {
         return true;
     }
     if defers_sub_ability_target_selection(&ability.effect) {
-        return false;
+        return chain_has_target_sink_after_deferred_effect(ability.sub_ability.as_deref());
     }
     ability
         .sub_ability
         .as_deref()
         .is_some_and(chain_has_target_sink)
+}
+
+fn chain_has_target_sink_after_deferred_effect(sub_ability: Option<&ResolvedAbility>) -> bool {
+    let Some(sub_ability) = sub_ability else {
+        return false;
+    };
+    if defers_conditional_target_selection(sub_ability) {
+        return false;
+    }
+    if skips_stack_targets_after_deferred_effect(&sub_ability.effect) {
+        return chain_has_target_sink_after_deferred_effect(sub_ability.sub_ability.as_deref());
+    }
+    chain_has_target_sink(sub_ability)
 }
 
 fn minimum_targets_in_chain(ability: &ResolvedAbility) -> usize {
@@ -2178,7 +2321,7 @@ fn minimum_targets_in_chain(ability: &ResolvedAbility) -> usize {
     let current = attach_targets + move_counter_targets + player_companion + current;
 
     let rest = if defers_sub_ability_target_selection(&ability.effect) {
-        0
+        minimum_targets_after_deferred_effect(ability.sub_ability.as_deref())
     } else {
         ability
             .sub_ability
@@ -2188,6 +2331,19 @@ fn minimum_targets_in_chain(ability: &ResolvedAbility) -> usize {
     };
 
     current + rest
+}
+
+fn minimum_targets_after_deferred_effect(sub_ability: Option<&ResolvedAbility>) -> usize {
+    let Some(sub_ability) = sub_ability else {
+        return 0;
+    };
+    if defers_conditional_target_selection(sub_ability) {
+        return 0;
+    }
+    if skips_stack_targets_after_deferred_effect(&sub_ability.effect) {
+        return minimum_targets_after_deferred_effect(sub_ability.sub_ability.as_deref());
+    }
+    minimum_targets_in_chain(sub_ability)
 }
 
 /// CR 700.2a: The controller of a modal spell or activated ability chooses the mode(s)
@@ -2291,8 +2447,9 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AbilityKind, CounterTransferMode, Duration, Effect, FilterProp, ModalChoice,
-        ModalSelectionConstraint, PtValue, QuantityExpr, QuantityRef, TargetFilter, TypeFilter,
-        TypedFilter, UnlessCost, UnlessPayModifier,
+        ModalSelectionConstraint, MultiTargetSpec, PtValue, QuantityExpr, QuantityRef,
+        SearchSelectionConstraint, TargetFilter, TargetRef, TypeFilter, TypedFilter, UnlessCost,
+        UnlessPayModifier,
     };
     use crate::types::card_type::CoreType;
     use crate::types::game_state::{GameState, TargetSelectionConstraint, TargetSelectionSlot};
@@ -2561,6 +2718,123 @@ mod tests {
             vec![p_b],
             "DamageAll should get target 1 (the second player slot)"
         );
+    }
+
+    #[test]
+    fn search_library_collects_later_independent_stack_targets() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Fertilid's Favor".to_string(),
+            Zone::Stack,
+        );
+        let artifact = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Target artifact".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&artifact)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Artifact);
+
+        let mut put_counters = ResolvedAbility::new(
+            Effect::PutCounter {
+                counter_type: "P1P1".to_string(),
+                count: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::Or {
+                    filters: vec![
+                        TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact)),
+                        TargetFilter::Typed(TypedFilter::creature()),
+                    ],
+                },
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        put_counters.multi_target = Some(MultiTargetSpec::fixed(0, 1));
+
+        let shuffle = ResolvedAbility::new(
+            Effect::Shuffle {
+                target: TargetFilter::Player,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        )
+        .sub_ability(put_counters);
+        let put_land = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Library),
+                destination: Zone::Battlefield,
+                target: TargetFilter::Any,
+                owner_library: false,
+                enter_transformed: false,
+                under_your_control: false,
+                enter_tapped: true,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        )
+        .sub_ability(shuffle);
+        let mut ability = ResolvedAbility::new(
+            Effect::SearchLibrary {
+                filter: TargetFilter::Typed(TypedFilter::land()),
+                count: QuantityExpr::Fixed { value: 1 },
+                reveal: false,
+                target_player: Some(TargetFilter::Player),
+                selection_constraint: SearchSelectionConstraint::None,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        )
+        .sub_ability(put_land);
+
+        let slots = build_target_slots(&state, &ability).unwrap();
+
+        assert_eq!(slots.len(), 2);
+        assert!(!slots[0].optional, "target player is required");
+        assert!(slots[0]
+            .legal_targets
+            .contains(&TargetRef::Player(PlayerId(0))));
+        assert!(
+            slots[1].optional,
+            "up to one artifact or creature is optional"
+        );
+        assert!(slots[1]
+            .legal_targets
+            .contains(&TargetRef::Object(artifact)));
+
+        assign_selected_slots_in_chain(
+            &mut ability,
+            &[
+                Some(TargetRef::Player(PlayerId(0))),
+                Some(TargetRef::Object(artifact)),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(ability.targets, vec![TargetRef::Player(PlayerId(0))]);
+        let counter_step = ability
+            .sub_ability
+            .as_deref()
+            .and_then(|change_zone| change_zone.sub_ability.as_deref())
+            .and_then(|shuffle| shuffle.sub_ability.as_deref())
+            .expect("counter continuation must exist");
+        assert_eq!(counter_step.targets, vec![TargetRef::Object(artifact)]);
     }
 
     #[test]

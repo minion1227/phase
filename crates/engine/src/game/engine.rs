@@ -2246,6 +2246,48 @@ fn apply_action(
             triggers_processed_inline = true;
             engine_combat::handle_declare_blockers(state, *player, &assignments, &mut events)?
         }
+        (
+            WaitingFor::UntapChoice {
+                player,
+                candidates,
+                chosen_not_to_untap,
+            },
+            GameAction::ChooseUntap { object_id, untap },
+        ) => {
+            if state.priority_player
+                != turn_control::authorized_submitter_for_player(state, *player)
+            {
+                return Err(EngineError::NotYourPriority);
+            }
+            if !candidates.contains(&object_id) {
+                return Err(EngineError::InvalidAction(
+                    "Invalid untap choice object".to_string(),
+                ));
+            }
+
+            let remaining: Vec<ObjectId> = candidates
+                .iter()
+                .copied()
+                .filter(|candidate| candidate != &object_id)
+                .collect();
+            let mut declined = chosen_not_to_untap.clone();
+            if !untap {
+                declined.push(object_id);
+            }
+
+            if !remaining.is_empty() {
+                WaitingFor::UntapChoice {
+                    player: *player,
+                    candidates: remaining,
+                    chosen_not_to_untap: declined,
+                }
+            } else {
+                let skipped: std::collections::HashSet<ObjectId> = declined.into_iter().collect();
+                turns::execute_untap_with_choices(state, &mut events, &skipped);
+                turns::advance_phase(state, &mut events);
+                turns::auto_advance(state, &mut events)
+            }
+        }
         (WaitingFor::ReplacementChoice { .. }, GameAction::ChooseReplacement { index }) => {
             engine_replacement::handle_replacement_choice(state, index, &mut events)?
         }

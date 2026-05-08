@@ -1019,6 +1019,14 @@ pub enum WaitingFor {
         #[serde(default)]
         valid_block_targets: HashMap<ObjectId, Vec<ObjectId>>,
     },
+    /// CR 502.3: During the untap step, the active player may choose not to
+    /// untap permanents with "You may choose not to untap..." static abilities.
+    UntapChoice {
+        player: PlayerId,
+        candidates: Vec<ObjectId>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        chosen_not_to_untap: Vec<ObjectId>,
+    },
     GameOver {
         winner: Option<PlayerId>,
     },
@@ -2040,6 +2048,7 @@ impl WaitingFor {
             | WaitingFor::TargetSelection { player, .. }
             | WaitingFor::DeclareAttackers { player, .. }
             | WaitingFor::DeclareBlockers { player, .. }
+            | WaitingFor::UntapChoice { player, .. }
             | WaitingFor::ReplacementChoice { player, .. }
             | WaitingFor::CopyTargetChoice { player, .. }
             | WaitingFor::ExploreChoice { player, .. }

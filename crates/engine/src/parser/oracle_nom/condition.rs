@@ -65,6 +65,7 @@ fn parse_state_presence_conditions(input: &str) -> OracleResult<'_, StaticCondit
         parse_zone_conditions,
         parse_there_are_counters_on_source,
         parse_there_are_conditions,
+        parse_there_exists_compound_zone_condition,
         parse_there_exists_condition,
         parse_subject_first_zone_count,
     ))
@@ -2541,6 +2542,64 @@ fn parse_there_are_conditions(input: &str) -> OracleResult<'_, StaticCondition> 
     ))
 }
 
+/// Parse "there is a/an X card and a/an Y card in your <zone>" as two
+/// independent zone-count predicates sharing the same zone/scope suffix.
+fn parse_there_exists_compound_zone_condition(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = alt((tag("there's "), tag("there is "))).parse(input)?;
+    let (rest, _) = parse_article(rest)?;
+    let (rest, first_card_types) = parse_single_card_type_before_and(rest)?;
+    let (rest, _) = tag(" and ").parse(rest)?;
+    let (rest, _) = parse_article(rest)?;
+    let (rest, second_card_types) = parse_single_card_type_before_zone(rest)?;
+    let (rest, _) = tag(" in ").parse(rest)?;
+    let (rest, (zone, scope)) = parse_scoped_zone_count_ref(rest)?;
+    Ok((
+        rest,
+        StaticCondition::And {
+            conditions: vec![
+                make_quantity_ge(
+                    QuantityRef::ZoneCardCount {
+                        zone: zone.clone(),
+                        card_types: first_card_types,
+                        scope: scope.clone(),
+                    },
+                    1,
+                ),
+                make_quantity_ge(
+                    QuantityRef::ZoneCardCount {
+                        zone,
+                        card_types: second_card_types,
+                        scope,
+                    },
+                    1,
+                ),
+            ],
+        },
+    ))
+}
+
+fn parse_single_card_type_before_and(input: &str) -> OracleResult<'_, Vec<TypeFilter>> {
+    let (rest, type_text) = take_until(" card and ").parse(input)?;
+    let (rest, _) = tag(" card").parse(rest)?;
+    Ok((rest, parse_zone_card_type_text(type_text)))
+}
+
+fn parse_single_card_type_before_zone(input: &str) -> OracleResult<'_, Vec<TypeFilter>> {
+    let (rest, type_text) = take_until(" card in ").parse(input)?;
+    let (rest, _) = tag(" card").parse(rest)?;
+    Ok((rest, parse_zone_card_type_text(type_text)))
+}
+
+fn parse_zone_card_type_text(type_text: &str) -> Vec<TypeFilter> {
+    let (filter, _) = parse_type_phrase(type_text.trim());
+    let mut card_types = match filter {
+        TargetFilter::Typed(TypedFilter { type_filters, .. }) => type_filters,
+        _ => vec![],
+    };
+    card_types.retain(|type_filter| *type_filter != TypeFilter::Card);
+    card_types
+}
+
 /// CR 700.2: Parse "N or more [type] cards are in your [zone]" — subject-first
 /// grammatical form of the threshold condition. Grammatically inverted form of
 /// `parse_there_are_conditions` ("there are N or more cards in your graveyard").
@@ -4036,6 +4095,42 @@ mod tests {
                 other => panic!("expected Lesson graveyard count GE 1, got {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn test_there_exists_compound_card_types_in_graveyard() {
+        let (rest, condition) =
+            parse_inner_condition("there is an instant card and a sorcery card in your graveyard")
+                .unwrap();
+        assert_eq!(rest, "");
+        let StaticCondition::And { conditions } = condition else {
+            panic!("expected compound graveyard condition, got {condition:?}");
+        };
+        assert_eq!(conditions.len(), 2);
+        assert_zone_card_count_condition(&conditions[0], TypeFilter::Instant);
+        assert_zone_card_count_condition(&conditions[1], TypeFilter::Sorcery);
+    }
+
+    fn assert_zone_card_count_condition(condition: &StaticCondition, expected: TypeFilter) {
+        let StaticCondition::QuantityComparison {
+            lhs:
+                QuantityExpr::Ref {
+                    qty:
+                        QuantityRef::ZoneCardCount {
+                            zone,
+                            card_types,
+                            scope,
+                        },
+                },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 1 },
+        } = condition
+        else {
+            panic!("expected zone card count >= 1, got {condition:?}");
+        };
+        assert_eq!(*zone, ZoneRef::Graveyard);
+        assert_eq!(*scope, CountScope::Controller);
+        assert_eq!(card_types, &vec![expected]);
     }
 
     #[test]

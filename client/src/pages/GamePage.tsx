@@ -1192,6 +1192,11 @@ function GamePageContent({
             <OptionalEffectModal />
           )}
 
+        {waitingFor?.type === "UntapChoice" &&
+          canActForWaitingState && (
+            <UntapChoiceModal />
+          )}
+
         {/* Unless payment choice ("Counter unless you pay {X}") */}
         {waitingFor?.type === "UnlessPayment" &&
           canActForWaitingState && (
@@ -2041,6 +2046,49 @@ function OptionalEffectModal() {
   if (waitingFor?.type !== "OptionalEffectChoice" && waitingFor?.type !== "OpponentMayChoice") return null;
 
   return <OptionalEffectModalContent waitingFor={waitingFor} objects={objects} dispatch={dispatch} />;
+}
+
+// ── Untap Choice Modal ─────────────────────────────────────────────────
+
+function UntapChoiceModal() {
+  const dispatch = useGameDispatch();
+  const waitingFor = useGameStore((s) => s.gameState?.waiting_for);
+  const objects = useGameStore((s) => s.gameState?.objects);
+
+  if (waitingFor?.type !== "UntapChoice") return null;
+
+  const objectId = waitingFor.data.candidates[0];
+  if (objectId == null) return null;
+
+  const object = objects?.[objectId];
+  const name = object?.name ?? "Permanent";
+
+  return (
+    <ChoiceModal
+      title={`Untap ${name}?`}
+      subtitle="Choose whether this permanent untaps during your untap step."
+      previewCardName={object?.name}
+      previewCardTypes={object?.card_types}
+      options={[
+        {
+          id: "untap",
+          label: "Untap",
+          description: `${name} untaps now.`,
+        },
+        {
+          id: "keep-tapped",
+          label: "Keep tapped",
+          description: `${name} stays tapped this untap step.`,
+        },
+      ]}
+      onChoose={(id) =>
+        dispatch({
+          type: "ChooseUntap",
+          data: { object_id: objectId, untap: id === "untap" },
+        })
+      }
+    />
+  );
 }
 
 // ── Unless Payment Modal (CR 118.12) ────────────────────────────────────

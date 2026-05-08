@@ -30,6 +30,7 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         | WaitingFor::DistributeAmong { .. } => DecisionKind::SelectTarget,
         WaitingFor::DeclareAttackers { .. } => DecisionKind::DeclareAttackers,
         WaitingFor::DeclareBlockers { .. } => DecisionKind::DeclareBlockers,
+        WaitingFor::UntapChoice { .. } => DecisionKind::ActivateAbility,
         // CR 508.1d + CR 509.1c: Combat tax — route by context so the attack-tax
         // policy sees `DeclareAttackers` candidates and the block-tax policy sees
         // `DeclareBlockers` candidates.

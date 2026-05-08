@@ -387,6 +387,21 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
             valid_blocker_ids,
             valid_block_targets,
         } => blocker_actions(*player, valid_blocker_ids, valid_block_targets),
+        WaitingFor::UntapChoice {
+            player, candidates, ..
+        } => candidates
+            .iter()
+            .map(|object_id| {
+                candidate(
+                    GameAction::ChooseUntap {
+                        object_id: *object_id,
+                        untap: true,
+                    },
+                    TacticalClass::Utility,
+                    Some(*player),
+                )
+            })
+            .collect(),
         WaitingFor::EquipTarget {
             player,
             equipment_id,

@@ -12250,6 +12250,82 @@ mod tests {
         assert_eq!(base_filters.len(), 2);
     }
 
+    #[test]
+    fn flow_state_conditionally_keeps_two_for_instant_and_sorcery_in_graveyard() {
+        let def = parse_effect_chain(
+            "Look at the top three cards of your library. Put one of them into your hand and the rest on the bottom of your library in any order. If there is an instant card and a sorcery card in your graveyard, instead put two of them into your hand and the rest on the bottom of your library in any order.",
+            AbilityKind::Spell,
+        );
+
+        let Effect::Dig {
+            count,
+            keep_count,
+            up_to,
+            filter,
+            destination,
+            rest_destination,
+            ..
+        } = &*def.effect
+        else {
+            panic!("expected conditional Flow State Dig, got {:?}", def.effect);
+        };
+        assert_eq!(*count, QuantityExpr::Fixed { value: 3 });
+        assert_eq!(*keep_count, Some(2));
+        assert!(!*up_to);
+        assert_eq!(*filter, TargetFilter::Any);
+        assert_eq!(*destination, Some(Zone::Hand));
+        assert_eq!(*rest_destination, Some(Zone::Library));
+
+        let Some(AbilityCondition::And { conditions }) = &def.condition else {
+            panic!(
+                "expected instant+sorcery graveyard condition, got {:?}",
+                def.condition
+            );
+        };
+        assert_eq!(conditions.len(), 2);
+        assert_graveyard_card_count_condition(&conditions[0], TypeFilter::Instant);
+        assert_graveyard_card_count_condition(&conditions[1], TypeFilter::Sorcery);
+
+        let base = def
+            .else_ability
+            .as_deref()
+            .expect("base Flow State Dig must be stored as else_ability");
+        let Effect::Dig {
+            keep_count: base_keep_count,
+            up_to: base_up_to,
+            rest_destination: base_rest_destination,
+            ..
+        } = &*base.effect
+        else {
+            panic!("expected base Flow State Dig, got {:?}", base.effect);
+        };
+        assert_eq!(*base_keep_count, Some(1));
+        assert!(!*base_up_to);
+        assert_eq!(*base_rest_destination, Some(Zone::Library));
+    }
+
+    fn assert_graveyard_card_count_condition(condition: &AbilityCondition, expected: TypeFilter) {
+        let AbilityCondition::QuantityCheck {
+            lhs:
+                QuantityExpr::Ref {
+                    qty:
+                        QuantityRef::ZoneCardCount {
+                            zone,
+                            card_types,
+                            scope,
+                        },
+                },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 1 },
+        } = condition
+        else {
+            panic!("expected graveyard card count condition, got {condition:?}");
+        };
+        assert_eq!(*zone, ZoneRef::Graveyard);
+        assert_eq!(*scope, CountScope::Controller);
+        assert_eq!(card_types, &vec![expected]);
+    }
+
     /// CR 601.2f: Regression gate — "This ability costs {1} less to activate
     /// for each page counter on this artifact" must parse into an
     /// `Effect::Unimplemented` sub_ability whose description carries the full

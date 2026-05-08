@@ -250,6 +250,14 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
         WaitingFor::DeclareBlockers { .. } => Some(GameAction::DeclareBlockers {
             assignments: Vec::new(),
         }),
+        WaitingFor::UntapChoice { candidates, .. } => {
+            candidates
+                .first()
+                .map(|&object_id| GameAction::ChooseUntap {
+                    object_id,
+                    untap: true,
+                })
+        }
 
         // Target selection: skip optional slots, fizzle mandatory ones.
         // TriggerTargetSelection is not a pending cast — the trigger is

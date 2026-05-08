@@ -63,6 +63,12 @@ pub enum GameAction {
     DeclareBlockers {
         assignments: Vec<(ObjectId, ObjectId)>,
     },
+    /// CR 502.3: Choose whether a permanent with "You may choose not to untap"
+    /// untaps during the active player's untap step.
+    ChooseUntap {
+        object_id: ObjectId,
+        untap: bool,
+    },
     MulliganDecision {
         keep: bool,
     },
@@ -627,6 +633,7 @@ impl GameAction {
             GameAction::TurnFaceUp { object_id } => Some(*object_id),
             GameAction::ChooseRingBearer { target } => Some(*target),
             GameAction::ChooseDamageSource { source } => Some(*source),
+            GameAction::ChooseUntap { object_id, .. } => Some(*object_id),
             GameAction::TapForConvoke { object_id, .. } => Some(*object_id),
             GameAction::ChooseLegend { keep } => Some(*keep),
             GameAction::CastPreparedCopy { source } => Some(*source),
