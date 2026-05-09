@@ -5,7 +5,7 @@ use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, tag_no_case, take_until};
 use nom::character::complete::{alpha1, space1};
-use nom::combinator::{opt, rest, value};
+use nom::combinator::{all_consuming, opt, rest, value};
 use nom::multi::many0;
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
@@ -32,8 +32,9 @@ use super::oracle_util::{
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, AbilityTag, ActivationRestriction, AttachmentKind,
     BasicLandType, CardPlayMode, ChosenSubtypeKind, Comparator, ContinuousModification,
-    ControllerRef, CountScope, FilterProp, ObjectScope, ParsedCondition, QuantityExpr, QuantityRef,
-    StaticCondition, StaticDefinition, TargetFilter, TypeFilter, TypedFilter,
+    ControllerRef, CostCategory, CountScope, FilterProp, ObjectScope, ParsedCondition,
+    QuantityExpr, QuantityRef, StaticCondition, StaticDefinition, TargetFilter, TypeFilter,
+    TypedFilter,
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::{parse_counter_type, CounterMatch};
@@ -453,6 +454,10 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
     let text = strip_reminder_text(text);
     let lower = text.to_lowercase();
     let tp = TextPair::new(&text, &lower);
+
+    if let Some(def) = parse_loyalty_activation_timing_permission(&tp, &text) {
+        return Some(def);
+    }
 
     // CR 510.1c: Attached-object conditional variants must precede the generic
     // inverted "As long as ..." rewrite so the condition binds to the
@@ -1930,6 +1935,52 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
     }
 
     None
+}
+
+fn parse_self_loyalty_activation_permission(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        (
+            tag("you may activate "),
+            opt(alt((
+                tag("her "),
+                tag("his "),
+                tag("its "),
+                tag("their "),
+                tag("~'s "),
+            ))),
+            tag("loyalty abilities any time you could cast an instant"),
+        ),
+    )
+    .parse(input)
+}
+
+fn parse_loyalty_activation_timing_permission(
+    tp: &TextPair<'_>,
+    text: &str,
+) -> Option<StaticDefinition> {
+    let condition = nom_on_lower(tp.original, tp.lower, |i| {
+        let (i, condition_text) =
+            preceded(tag("as long as "), terminated(take_until(", "), tag(", "))).parse(i)?;
+        let (i, _) = parse_self_loyalty_activation_permission(i)?;
+        let (i, _) = opt(tag(".")).parse(i)?;
+        let (i, _) = all_consuming(value((), tag(""))).parse(i)?;
+        Ok((i, condition_text.to_string()))
+    })
+    .map(|(condition_text, _)| {
+        parse_static_condition(&condition_text).unwrap_or(StaticCondition::Unrecognized {
+            text: condition_text,
+        })
+    })?;
+
+    Some(
+        StaticDefinition::new(StaticMode::ActivateAsInstant {
+            cost_category: CostCategory::PaysLoyalty,
+        })
+        .affected(TargetFilter::SelfRef)
+        .condition(condition)
+        .description(text.to_string()),
+    )
 }
 
 /// Like `parse_static_line`, but returns all `StaticDefinition`s produced by a line.
@@ -10236,6 +10287,22 @@ mod tests {
                 TypedFilter::default().controller(ControllerRef::You),
             ))
         );
+    }
+
+    #[test]
+    fn static_same_turn_loyalty_abilities_activate_as_instant() {
+        let def = parse_static_line(
+            "As long as ~ entered this turn, you may activate her loyalty abilities any time you could cast an instant.",
+        )
+        .unwrap();
+        assert_eq!(
+            def.mode,
+            StaticMode::ActivateAsInstant {
+                cost_category: CostCategory::PaysLoyalty,
+            }
+        );
+        assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+        assert_eq!(def.condition, Some(StaticCondition::SourceEnteredThisTurn));
     }
 
     #[test]

@@ -4,7 +4,9 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
-use super::ability::{AbilityCost, CardPlayMode, QuantityExpr, QuantityRef, TargetFilter};
+use super::ability::{
+    AbilityCost, CardPlayMode, CostCategory, QuantityExpr, QuantityRef, TargetFilter,
+};
 use super::keywords::Keyword;
 use super::mana::{ManaColor, ManaCost};
 use super::phase::Phase;
@@ -398,6 +400,13 @@ pub enum StaticMode {
         /// The new per-turn activation count.
         new_limit: u8,
     },
+    /// CR 602.5e + CR 611.3a: Static permission allowing affected permanents'
+    /// activated abilities in the specified cost category to be activated at
+    /// instant timing. The affected permanent filter lives on `StaticDefinition`.
+    /// Canonical class: The Wandering Emperor's same-turn loyalty permission.
+    ActivateAsInstant {
+        cost_category: CostCategory,
+    },
     /// CR 601.2f: Increases the cost of spells matching the filter.
     /// Permanent-based cost increase applied during casting (Thalia, etc.).
     RaiseCost {
@@ -685,6 +694,9 @@ impl Hash for StaticMode {
                 keyword.hash(state);
                 new_limit.hash(state);
             }
+            StaticMode::ActivateAsInstant { cost_category } => {
+                cost_category.hash(state);
+            }
             StaticMode::ExtraBlockers { count } => count.hash(state),
             StaticMode::RevealTopOfLibrary { all_players } => all_players.hash(state),
             StaticMode::CantBeBlockedExceptBy { filter } => filter.hash(state),
@@ -761,6 +773,9 @@ impl fmt::Display for StaticMode {
             }
             StaticMode::ModifyActivationLimit { keyword, new_limit } => {
                 write!(f, "ModifyActivationLimit({keyword},{new_limit})")
+            }
+            StaticMode::ActivateAsInstant { cost_category } => {
+                write!(f, "ActivateAsInstant({cost_category:?})")
             }
             StaticMode::RaiseCost { .. } => write!(f, "RaiseCost"),
             StaticMode::CantGainLife => write!(f, "CantGainLife"),
@@ -942,6 +957,17 @@ impl FromStr for StaticMode {
                     }
                 } else {
                     StaticMode::Other(s.to_string())
+                }
+            }
+            s if s.starts_with("ActivateAsInstant(") => {
+                let inner = s
+                    .strip_prefix("ActivateAsInstant(")
+                    .and_then(|s| s.strip_suffix(')'));
+                match inner {
+                    Some("PaysLoyalty") => StaticMode::ActivateAsInstant {
+                        cost_category: CostCategory::PaysLoyalty,
+                    },
+                    _ => StaticMode::Other(s.to_string()),
                 }
             }
             "RaiseCost" => StaticMode::RaiseCost {

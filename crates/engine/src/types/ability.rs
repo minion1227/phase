@@ -3376,7 +3376,7 @@ pub enum AbilityCost {
 /// `ability.cost_categories().contains(&CostCategory::SacrificesPermanent)`
 /// rather than match on `AbilityCost::Sacrifice { .. }` directly. This
 /// preserves the "single authority for ability costs" invariant from CLAUDE.md.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum CostCategory {
     ManaOnly,
     TapsSelf,

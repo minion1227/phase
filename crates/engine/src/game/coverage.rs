@@ -46,6 +46,7 @@ fn is_data_carrying_static(mode: &StaticMode) -> bool {
             | StaticMode::TopOfLibraryCastPermission { .. }
             | StaticMode::CastFromHandFree { .. }
             | StaticMode::CastWithKeyword { .. }
+            | StaticMode::ActivateAsInstant { .. }
             | StaticMode::MaximumHandSize { .. }
             | StaticMode::CantBeBlockedBy { .. }
             // CR 602.5 + CR 603.2a: CantBeActivated carries `who` + `source_filter`.
@@ -5884,6 +5885,9 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
             StaticMode::CastWithFlash => {
                 effective_lower.contains("as though it had flash")
                     || effective_lower.contains("as though they had flash")
+            }
+            StaticMode::ActivateAsInstant { .. } => {
+                effective_lower.contains("any time you could cast an instant")
             }
             StaticMode::MayChooseNotToUntap => effective_lower.contains("may choose not to untap"),
             StaticMode::CantDraw { .. } => effective_lower.contains("can't draw"),

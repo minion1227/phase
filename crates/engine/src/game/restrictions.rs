@@ -412,6 +412,53 @@ fn effective_activation_limit(
     limit
 }
 
+fn has_activate_as_instant_permission(
+    state: &crate::types::game_state::GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    ability_index: usize,
+) -> bool {
+    let Some(ability) = state
+        .objects
+        .get(&source_id)
+        .and_then(|obj| obj.abilities.get(ability_index))
+    else {
+        return false;
+    };
+    let cost_categories = ability.cost_categories();
+    if cost_categories.is_empty() {
+        return false;
+    }
+
+    crate::game::functioning_abilities::battlefield_active_statics(state).any(
+        |(static_source, def)| {
+            if static_source.controller != player {
+                return false;
+            }
+            let StaticMode::ActivateAsInstant {
+                cost_category: permitted_category,
+            } = def.mode
+            else {
+                return false;
+            };
+            if !cost_categories.contains(&permitted_category) {
+                return false;
+            }
+            def.affected.as_ref().is_some_and(|filter| {
+                super::filter::matches_target_filter(
+                    state,
+                    source_id,
+                    filter,
+                    &super::filter::FilterContext::from_source_with_controller(
+                        static_source.id,
+                        static_source.controller,
+                    ),
+                )
+            })
+        },
+    )
+}
+
 fn activation_restriction_applies(
     state: &crate::types::game_state::GameState,
     player: PlayerId,
@@ -423,7 +470,10 @@ fn activation_restriction_applies(
 
     match restriction {
         // CR 602.5d: "Activate only as a sorcery" means the player must follow sorcery timing rules.
-        ActivationRestriction::AsSorcery => is_sorcery_speed_window(state, player),
+        ActivationRestriction::AsSorcery => {
+            is_sorcery_speed_window(state, player)
+                || has_activate_as_instant_permission(state, player, source_id, ability_index)
+        }
         ActivationRestriction::AsInstant => true,
         // CR 702.62a: "If you could begin to cast this card by putting it onto the
         // stack from your hand" — defer to the underlying card type's natural

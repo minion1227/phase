@@ -4841,7 +4841,12 @@ pub fn can_activate_ability_now(
     // which is the wrong granularity — it would let each loyalty ability fire once.
     // Defer to `can_activate_loyalty`, the single authority for the per-permanent gate.
     if matches!(ability_def.cost, Some(AbilityCost::Loyalty { .. }))
-        && !super::planeswalker::can_activate_loyalty(state, source_id, player)
+        && !super::planeswalker::can_activate_loyalty_ability(
+            state,
+            source_id,
+            player,
+            ability_index,
+        )
     {
         return false;
     }
@@ -5783,11 +5788,11 @@ mod tests {
     use crate::parser::oracle_static::parse_static_line;
     use crate::types::ability::{
         ActivationRestriction, BasicLandType, CastVariantPaid, CastingPermission, ChosenAttribute,
-        ChosenSubtypeKind, ContinuousModification, ControllerRef, FilterProp, GainLifePlayer,
-        GameRestriction, KickerVariant, ManaContribution, ManaProduction, ModalSelectionCondition,
-        ModalSelectionConstraint, QuantityExpr, RestrictionExpiry, RestrictionPlayerScope,
-        SearchSelectionConstraint, StaticCondition, StaticDefinition, TargetFilter, TypeFilter,
-        TypedFilter,
+        ChosenSubtypeKind, ContinuousModification, ControllerRef, CostCategory, FilterProp,
+        GainLifePlayer, GameRestriction, KickerVariant, ManaContribution, ManaProduction,
+        ModalSelectionCondition, ModalSelectionConstraint, QuantityExpr, RestrictionExpiry,
+        RestrictionPlayerScope, SearchSelectionConstraint, StaticCondition, StaticDefinition,
+        TargetFilter, TypeFilter, TypedFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card_type::{CoreType, Supertype};
@@ -15382,6 +15387,45 @@ mod tests {
             assert!(
                 can_activate_ability_now(&state, PlayerId(0), pw2, 1),
                 "CR 606.3 is per-permanent: PW2 ability 1 must remain activatable"
+            );
+        }
+
+        #[test]
+        fn same_turn_static_allows_loyalty_at_instant_timing() {
+            let mut state = setup_game_at_main_phase();
+            let pw = add_planeswalker(
+                &mut state,
+                PlayerId(0),
+                "The Wandering Emperor",
+                4,
+                vec![make_loyalty_ability(1)],
+            );
+            {
+                let obj = state.objects.get_mut(&pw).unwrap();
+                obj.entered_battlefield_turn = Some(state.turn_number);
+                obj.static_definitions.push(
+                    StaticDefinition::new(StaticMode::ActivateAsInstant {
+                        cost_category: CostCategory::PaysLoyalty,
+                    })
+                    .affected(TargetFilter::SelfRef)
+                    .condition(StaticCondition::SourceEnteredThisTurn),
+                );
+            }
+            state.active_player = PlayerId(1);
+            state.priority_player = PlayerId(0);
+            state.phase = Phase::DeclareAttackers;
+
+            assert!(
+                can_activate_ability_now(&state, PlayerId(0), pw, 0),
+                "same-turn static must override loyalty sorcery timing"
+            );
+
+            state.objects.get_mut(&pw).unwrap().entered_battlefield_turn =
+                Some(state.turn_number - 1);
+
+            assert!(
+                !can_activate_ability_now(&state, PlayerId(0), pw, 0),
+                "permission must lapse when SourceEnteredThisTurn is false"
             );
         }
     }

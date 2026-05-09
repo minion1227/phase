@@ -412,6 +412,10 @@ fn static_mode_is_optional_permission(mode: &StaticMode) -> bool {
             // "you may cast X as though it had flash if you pay Y" —
             // generalized cast-timing/keyword permission, always opt-in.
             | StaticMode::CastWithKeyword { .. }
+            // CR 602.5e: "You may activate [abilities] any time you could
+            // cast an instant" is an activation-timing permission, not an
+            // optional effect to execute during resolution.
+            | StaticMode::ActivateAsInstant { .. }
             // CR 117.3a: "You may play lands from your graveyard"
             // (Crucible, Ramunap Excavator, etc.) — graveyard-as-zone
             // cast permission, structurally opt-in.
@@ -1974,6 +1978,19 @@ mod tests {
         let parsed = parse(
             "Whenever a creature enters this turn, you may draw a card.",
             &["Sorcery"],
+        );
+
+        assert!(!has_swallowed_detector(&parsed, "Optional_YouMay"));
+    }
+
+    #[test]
+    fn optional_you_may_accepts_activation_timing_permission_static() {
+        let parsed = parse_named(
+            "Flash\n\
+             As long as The Wandering Emperor entered this turn, you may activate her loyalty abilities any time you could cast an instant.\n\
+             [+1]: Put a +1/+1 counter on up to one target creature.",
+            "The Wandering Emperor",
+            &["Planeswalker"],
         );
 
         assert!(!has_swallowed_detector(&parsed, "Optional_YouMay"));
