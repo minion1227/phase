@@ -300,6 +300,7 @@ fn fmt_target(filter: &TargetFilter) -> String {
         TargetFilter::ParentTarget => "parent target".into(),
         TargetFilter::ParentTargetSlot { index } => format!("parent target slot {index}"),
         TargetFilter::ParentTargetController => "parent target's controller".into(),
+        TargetFilter::ParentTargetOwner => "parent target's owner".into(),
         TargetFilter::PostReplacementSourceController => {
             "prevented event source's controller".into()
         }

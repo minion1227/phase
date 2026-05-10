@@ -6177,6 +6177,7 @@ fn lower_subject_predicate_ast(
                     TargetFilter::Controller
                         | TargetFilter::Player
                         | TargetFilter::ParentTargetController
+                        | TargetFilter::ParentTargetOwner
                         | TargetFilter::TriggeringPlayer
                         | TargetFilter::TriggeringSpellController
                         | TargetFilter::TriggeringSpellOwner
@@ -6465,7 +6466,8 @@ fn target_filter_can_target_player(filter: &TargetFilter) -> bool {
         | TargetFilter::TriggeringSpellOwner
         | TargetFilter::TriggeringPlayer
         | TargetFilter::DefendingPlayer
-        | TargetFilter::ParentTargetController => true,
+        | TargetFilter::ParentTargetController
+        | TargetFilter::ParentTargetOwner => true,
         TargetFilter::Typed(tf) => tf.type_filters.is_empty(),
         TargetFilter::Or { filters } | TargetFilter::And { filters } => {
             filters.iter().any(target_filter_can_target_player)

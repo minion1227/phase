@@ -91,6 +91,12 @@ pub fn parse_event_context_ref(text: &str) -> Option<(TargetFilter, &str)> {
                 TargetFilter::ParentTargetController,
                 tag("their controller"),
             ),
+            // CR 108.3 + CR 608.2c: "its owner" / "their owner" — owner of the parent target.
+            // Used by Aura damage triggers (Enslave) and damage continuations (Bomb Squad,
+            // The Beast Deathless Prince) where the anaphoric "its" refers to a permanent
+            // mentioned earlier in the sentence.
+            value(TargetFilter::ParentTargetOwner, tag("its owner")),
+            value(TargetFilter::ParentTargetOwner, tag("their owner")),
             value(TargetFilter::TriggeringPlayer, tag("that player")),
             value(TargetFilter::TriggeringSource, tag("that source")),
             // "that permanent or player" before "that permanent" — longest match first.
@@ -591,6 +597,9 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
                 tag("the source's controller"),
             ),
             value(TargetFilter::ParentTargetController, tag("its controller")),
+            // CR 108.3 + CR 608.2c: "its owner" / "their owner" — owner of the parent target.
+            value(TargetFilter::ParentTargetOwner, tag("its owner")),
+            value(TargetFilter::ParentTargetOwner, tag("their owner")),
             // CR 115.1 + CR 608.2c: "the permanent or player" — anaphoric
             // back-reference to the parent target on "any target" effects
             // (Rhystic Lightning's "deals 2 damage to the permanent or
@@ -5371,6 +5380,23 @@ mod tests {
     fn parse_target_that_land_controller_uses_parent_target_controller() {
         let (filter, rest) = parse_target("that land's controller");
         assert_eq!(filter, TargetFilter::ParentTargetController);
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn parse_target_its_owner_uses_parent_target_owner() {
+        // CR 108.3 + CR 608.2c: "its owner" anaphor — owner of the parent
+        // target object (Enslave: "enchanted creature deals 1 damage to its
+        // owner"; Bomb Squad: "that creature deals 4 damage to its owner").
+        let (filter, rest) = parse_target("its owner");
+        assert_eq!(filter, TargetFilter::ParentTargetOwner);
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn parse_target_their_owner_uses_parent_target_owner() {
+        let (filter, rest) = parse_target("their owner");
+        assert_eq!(filter, TargetFilter::ParentTargetOwner);
         assert_eq!(rest, "");
     }
 

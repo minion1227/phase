@@ -1984,6 +1984,17 @@ pub enum TargetFilter {
     /// Used for "its controller" in compound effects (e.g., "counter target spell. Its controller
     /// loses 2 life."). At resolution time, looks up the controller of the first parent target.
     ParentTargetController,
+    /// CR 108.3 + CR 608.2c: Resolves to the *owner* of the parent ability's target
+    /// object. Used for "its owner" anaphoric references where the acting player is the
+    /// owner of a previously-mentioned permanent — e.g., Enslave's "enchanted creature
+    /// deals 1 damage to its owner" or Bomb Squad's "that creature deals 4 damage to
+    /// its owner". Resolution mirrors `ParentTargetController` (parent target slot →
+    /// trigger-event source → AttachedTo host on source for Aura phase triggers), but
+    /// returns the resolved object's `owner` rather than `controller` per CR 108.3.
+    ///
+    /// Distinct from `Owner` (which always reads the source object's owner) and
+    /// `ParentTargetController` (which returns the controller per CR 109.4).
+    ParentTargetOwner,
     /// CR 109.5 + CR 608.2c: Resolves to the ability's *original* controller — the
     /// player who put the spell or ability on the stack — even when a surrounding
     /// `player_scope` iteration has rebound `ResolvedAbility::controller` to a
@@ -5605,6 +5616,7 @@ impl TargetFilter {
                 | TargetFilter::ParentTarget
                 | TargetFilter::ParentTargetSlot { .. }
                 | TargetFilter::ParentTargetController
+                | TargetFilter::ParentTargetOwner
                 | TargetFilter::PostReplacementSourceController
                 | TargetFilter::PostReplacementDamageTarget
                 | TargetFilter::TrackedSet { .. }
