@@ -1307,16 +1307,17 @@ fn detect_condition_unless(
         "\"unless_filter\":{",
         "\"unless_pay\":{",
         "\"unless_condition\":{",
-        "\"unless_payment\":{",
         "\"condition\":{",
         "Unless",
         // CR 605.1a: `CantBeActivated { exemption: ManaAbilities }` is the
         // structural encoding of "can't be activated unless they're mana abilities."
         "\"exemption\":\"ManaAbilities\"",
-        // CR 118.12: "Counter target spell unless its controller pays X" —
-        // captured as `Effect::Counter { unless_payment: Some(_) }` (Censor,
-        // Mana Leak, Disrupt, Spell Shrivel, etc.).
-        "\"unless_payment\":",
+        // CR 118.12 (post-2026-05-09 fold): "Counter target spell unless its
+        // controller pays X" is now captured as
+        // `AbilityDefinition.unless_pay` rather than
+        // `Effect::Counter.unless_payment`. The `"unless_pay":{` marker
+        // above subsumes both the trigger-level and counter-level encodings
+        // — the `unless_payment` marker has been retired.
     ];
     if json_has_any(ast_json, markers) {
         return;

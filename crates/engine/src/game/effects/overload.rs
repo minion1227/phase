@@ -294,7 +294,6 @@ mod tests {
         let mut def = leaf(Effect::Counter {
             target: creature_filter(),
             source_static: None,
-            unless_payment: None,
         });
         transform_ability_def(&mut def);
         assert!(matches!(*def.effect, Effect::Counter { .. }));

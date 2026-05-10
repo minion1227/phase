@@ -4,7 +4,7 @@ use crate::types::ability::MultiTargetSpec;
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, ActivationRestriction, CastingPermission, Duration,
     Effect, ManaProduction, ManaSpendRestriction, ModalSelectionConstraint, PaymentCost, PtValue,
-    QuantityExpr, SearchSelectionConstraint, StaticDefinition, TargetFilter, UnlessCost,
+    QuantityExpr, SearchSelectionConstraint, StaticDefinition, TargetFilter,
 };
 use crate::types::game_state::DistributionUnit;
 use crate::types::keywords::Keyword;
@@ -31,6 +31,12 @@ pub(crate) struct ParsedEffectClause {
     /// modal (e.g., "its controller may search their library"). Lowered into
     /// `AbilityDefinition.optional` so the resolver prompts the acting player.
     pub(crate) optional: bool,
+    /// CR 118.12: When set, the parsed effect carries an "unless [player] pays
+    /// [cost]" modifier (e.g., "Counter target spell unless its controller
+    /// pays {2}"). Lowered into `AbilityDefinition.unless_pay` so the
+    /// resolution-time runtime owns the payment choice via the unified
+    /// `unless_pay` pipeline (rather than a per-effect bespoke path).
+    pub(crate) unless_pay: Option<crate::types::ability::UnlessPayModifier>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -903,7 +909,12 @@ pub(crate) enum ZoneCounterImperativeAst {
     Counter {
         target: TargetFilter,
         source_static: Option<Box<StaticDefinition>>,
-        unless_payment: Option<UnlessCost>,
+        /// CR 118.12: "Counter target spell unless its controller pays {X}"
+        /// modifier. Lowered to `ParsedEffectClause.unless_pay` and ultimately
+        /// to `AbilityDefinition.unless_pay`, so the runtime resolves the
+        /// payment via the unified `unless_pay` pipeline rather than a
+        /// counter-specific branch.
+        unless_pay: Option<crate::types::ability::UnlessPayModifier>,
         /// CR 701.6 + CR 405.1: When `true`, lower to `Effect::CounterAll`
         /// (mass counter) instead of `Effect::Counter`. Mirrors the
         /// `Destroy { all }` and `Exile { all }` flags above. Triggered by
@@ -989,6 +1000,7 @@ pub(crate) fn parsed_clause(effect: Effect) -> ParsedEffectClause {
         multi_target: None,
         condition: None,
         optional: false,
+        unless_pay: None,
     }
 }
 

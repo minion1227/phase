@@ -3739,8 +3739,8 @@ fn rewrite_damage_recipient_to_post_replacement_target(def: &mut AbilityDefiniti
 /// CR 615.5: Strips an optional `"(when|if) damage is prevented this way, "`
 /// prelude before returning the body. The prelude restates the firing condition
 /// the replacement's `execute` hook already encodes — `Prevented` arm at
-/// `replacement.rs:2207` only stashes `post_replacement_effect` when prevention
-/// actually occurred — so the prelude is semantically a no-op and normalizes
+/// `replacement.rs:2207` only stashes `post_replacement_continuation` when
+/// prevention actually occurred — so the prelude is semantically a no-op and normalizes
 /// to a bare effect chain. Documenting this here preempts a future contributor
 /// adding a redundant "when damage is prevented" trigger arm in
 /// `oracle_trigger.rs`.

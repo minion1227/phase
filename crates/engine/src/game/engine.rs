@@ -3526,9 +3526,7 @@ fn handle_play_land(
             // execute ability is non-modifier work (Choose, etc.). Without this,
             // the choice prompt would fire at a random later resolution point with
             // the wrong controller context.
-            if state.post_replacement_effect.is_some()
-                || state.post_replacement_resolved_effect.is_some()
-            {
+            if state.post_replacement_continuation.is_some() {
                 state.post_replacement_source = None;
                 if let Some(next_waiting_for) =
                     engine_replacement::apply_pending_post_replacement_effect(
@@ -6971,7 +6969,6 @@ mod tests {
                 Effect::Counter {
                     target: TargetFilter::Typed(TypedFilter::card()),
                     source_static: None,
-                    unless_payment: None,
                 },
             ));
             obj.mana_cost = ManaCost::Cost {
@@ -10082,10 +10079,10 @@ mod phase_trigger_regression_tests {
     use crate::game::combat::AttackTarget;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityCondition, AbilityDefinition, AbilityKind, ControllerRef, Effect, FilterProp,
-        GainLifePlayer, ObjectScope, PlayerFilter, QuantityExpr, QuantityRef, ResolvedAbility,
-        TargetFilter, TargetRef, TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter,
-        UnlessCost, UnlessPayModifier,
+        AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ControllerRef, Effect,
+        FilterProp, GainLifePlayer, ObjectScope, PlayerFilter, QuantityExpr, QuantityRef,
+        ResolvedAbility, TargetFilter, TargetRef, TriggerConstraint, TriggerDefinition, TypeFilter,
+        TypedFilter, UnlessPayModifier,
     };
     use crate::types::card_type::CoreType;
     use crate::types::format::FormatConfig;
@@ -10581,7 +10578,7 @@ mod phase_trigger_regression_tests {
                     )),
                 });
             trigger.unless_pay = Some(UnlessPayModifier {
-                cost: UnlessCost::DynamicGeneric {
+                cost: AbilityCost::ManaDynamic {
                     quantity: QuantityExpr::Ref {
                         qty: QuantityRef::Power {
                             scope: ObjectScope::Source,
@@ -10642,7 +10639,7 @@ mod phase_trigger_regression_tests {
             state.waiting_for,
             WaitingFor::UnlessPayment {
                 player: PlayerId(1),
-                cost: UnlessCost::Fixed { ref cost },
+                cost: AbilityCost::Mana { ref cost },
                 ..
             } if *cost == ManaCost::generic(1)
         ));
@@ -11180,7 +11177,9 @@ mod phase_trigger_regression_tests {
 
         state.waiting_for = WaitingFor::UnlessPayment {
             player: PlayerId(0),
-            cost: UnlessCost::PayLife { amount: 2 },
+            cost: AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: 2 },
+            },
             pending_effect: Box::new(ability),
             trigger_event: None,
             effect_description: None,
@@ -11212,7 +11211,7 @@ mod phase_trigger_regression_tests {
         state.players[0].energy = 2;
         state.waiting_for = WaitingFor::UnlessPayment {
             player: PlayerId(0),
-            cost: UnlessCost::PayEnergy { amount: 2 },
+            cost: AbilityCost::PayEnergy { amount: 2 },
             pending_effect: Box::new(ResolvedAbility::new(
                 Effect::GainLife {
                     amount: QuantityExpr::Fixed { value: 1 },
@@ -11272,12 +11271,15 @@ mod phase_trigger_regression_tests {
 
         state.waiting_for = WaitingFor::UnlessPayment {
             player: PlayerId(0),
-            cost: UnlessCost::DiscardCard {
+            cost: AbilityCost::Discard {
+                count: QuantityExpr::Fixed { value: 1 },
                 filter: Some(TargetFilter::Typed(TypedFilter {
                     type_filters: vec![TypeFilter::Land],
                     controller: None,
                     properties: vec![],
                 })),
+                random: false,
+                self_ref: false,
             },
             pending_effect: Box::new(draw_that_many(source_id, PlayerId(0))),
             trigger_event: None,

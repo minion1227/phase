@@ -16,8 +16,8 @@ use super::quantity as nom_quantity;
 use crate::parser::oracle_target::{parse_type_phrase, parse_zone_suffix};
 use crate::types::ability::{
     AggregateFunction, CastManaObjectScope, CastManaSpentMetric, Comparator, ControllerRef,
-    CountScope, FilterProp, ObjectProperty, PlayerScope, QuantityExpr, QuantityRef,
-    StaticCondition, TargetFilter, TypeFilter, TypedFilter, ZoneRef,
+    CountScope, DamageGroupKey, FilterProp, ObjectProperty, PlayerScope, QuantityExpr, QuantityRef,
+    SharedQuality, StaticCondition, TargetFilter, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::events::PlayerActionKind;
@@ -114,6 +114,8 @@ fn parse_source_dealt_damage_to_opponent_this_turn(
             QuantityRef::DamageDealtThisTurn {
                 source: Box::new(TargetFilter::SelfRef),
                 target: Box::new(target),
+                aggregate: AggregateFunction::Sum,
+                group_by: None,
             },
             1,
         ),
@@ -129,6 +131,8 @@ fn parse_source_was_dealt_damage_this_turn(input: &str) -> OracleResult<'_, Stat
             QuantityRef::DamageDealtThisTurn {
                 source: Box::new(TargetFilter::Any),
                 target: Box::new(TargetFilter::SelfRef),
+                aggregate: AggregateFunction::Sum,
+                group_by: None,
             },
             1,
         ),
@@ -790,7 +794,7 @@ fn creatures_you_controlled_left_battlefield_this_turn_ref() -> QuantityRef {
 fn parse_control_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
     alt((
         // CR 201.2 + CR 603.4: "you control N or more [type] with different names"
-        // → QuantityComparison(ObjectCountDistinctNames >= N). Tried before the
+        // → QuantityComparison(ObjectCountDistinct[Name] >= N). Tried before the
         // plain ObjectCount arm so the `with different names` suffix is not
         // mis-classified as a raw count threshold. Field of the Dead canonical.
         parse_control_count_ge_distinct_names,
@@ -838,7 +842,7 @@ fn parse_ge_threshold(input: &str) -> OracleResult<'_, u32> {
 }
 
 /// CR 201.2 + CR 603.4: Parse "you control N or more [type] with different names"
-/// → `QuantityComparison { ObjectCountDistinctNames(filter) >= N }`.
+/// → `QuantityComparison { ObjectCountDistinct[Name](filter) >= N }`.
 ///
 /// Field of the Dead: "if you control seven or more lands with different
 /// names". Two objects with the same printed name count once. General enough
@@ -864,7 +868,10 @@ fn parse_control_count_ge_distinct_names(input: &str) -> OracleResult<'_, Static
         &input[consumed..],
         StaticCondition::QuantityComparison {
             lhs: QuantityExpr::Ref {
-                qty: QuantityRef::ObjectCountDistinctNames { filter },
+                qty: QuantityRef::ObjectCountDistinct {
+                    filter,
+                    qualities: vec![SharedQuality::Name],
+                },
             },
             comparator: Comparator::GE,
             rhs: QuantityExpr::Fixed { value: n as i32 },
@@ -1481,7 +1488,7 @@ fn parse_card_left_your_graveyard_this_turn(input: &str) -> OracleResult<'_, Sta
             QuantityRef::ZoneChangeCountThisTurn {
                 from: Some(Zone::Graveyard),
                 to: None,
-                filter: add_owned_you_non_token(TargetFilter::Any),
+                filter: add_owned_you_with_props(TargetFilter::Any, &[FilterProp::NonToken]),
             },
             1,
         ),
@@ -1511,7 +1518,7 @@ fn parse_permanent_put_into_your_hand_from_battlefield_this_turn(
             QuantityRef::ZoneChangeCountThisTurn {
                 from: Some(Zone::Battlefield),
                 to: Some(Zone::Hand),
-                filter: add_owned_you(filter),
+                filter: add_owned_you_with_props(filter, &[]),
             },
             1,
         ),
@@ -1539,7 +1546,7 @@ fn parse_card_put_into_your_graveyard_from_anywhere_this_turn(
             QuantityRef::ZoneChangeCountThisTurn {
                 from: None,
                 to: Some(Zone::Graveyard),
-                filter: add_owned_you_non_token(filter),
+                filter: add_owned_you_with_props(filter, &[FilterProp::NonToken]),
             },
             1,
         ),
@@ -1574,56 +1581,38 @@ fn parse_object_put_into_graveyard_from_battlefield_this_turn(
     ))
 }
 
-fn add_owned_you(filter: TargetFilter) -> TargetFilter {
+/// CR 109.5: Append `Owned { controller: You }` plus any caller-supplied
+/// `extras` to `filter`'s property set, skipping props whose variant tag
+/// already appears (presence is variant-tag equality via `mem::discriminant`,
+/// matching the original tag-only `matches!(p, FilterProp::X { .. })` checks).
+/// Pass `&[]` for the bare "owned by you" case; pass `&[FilterProp::NonToken]`
+/// for "you own a nontoken card" patterns. Wraps `TargetFilter::Any` into a
+/// fresh `Typed` filter carrying the same property set; returns other variants
+/// (`Player`, `SpecificObject`, …) unchanged because owner-tagging is
+/// meaningless on non-typed shapes.
+fn add_owned_you_with_props(filter: TargetFilter, extras: &[FilterProp]) -> TargetFilter {
+    let owned = FilterProp::Owned {
+        controller: ControllerRef::You,
+    };
+    let push_unique_by_tag = |props: &mut Vec<FilterProp>, prop: FilterProp| {
+        let tag = std::mem::discriminant(&prop);
+        if !props.iter().any(|p| std::mem::discriminant(p) == tag) {
+            props.push(prop);
+        }
+    };
     match filter {
         TargetFilter::Typed(mut typed) => {
-            if !typed
-                .properties
-                .iter()
-                .any(|property| matches!(property, FilterProp::Owned { .. }))
-            {
-                typed.properties.push(FilterProp::Owned {
-                    controller: ControllerRef::You,
-                });
+            push_unique_by_tag(&mut typed.properties, owned);
+            for extra in extras {
+                push_unique_by_tag(&mut typed.properties, extra.clone());
             }
             TargetFilter::Typed(typed)
         }
         TargetFilter::Any => {
-            TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Owned {
-                controller: ControllerRef::You,
-            }]))
+            let mut props = vec![owned];
+            props.extend(extras.iter().cloned());
+            TargetFilter::Typed(TypedFilter::default().properties(props))
         }
-        other => other,
-    }
-}
-
-fn add_owned_you_non_token(filter: TargetFilter) -> TargetFilter {
-    match filter {
-        TargetFilter::Typed(mut typed) => {
-            if !typed
-                .properties
-                .iter()
-                .any(|prop| matches!(prop, FilterProp::Owned { .. }))
-            {
-                typed.properties.push(FilterProp::Owned {
-                    controller: ControllerRef::You,
-                });
-            }
-            if !typed
-                .properties
-                .iter()
-                .any(|prop| matches!(prop, FilterProp::NonToken))
-            {
-                typed.properties.push(FilterProp::NonToken);
-            }
-            TargetFilter::Typed(typed)
-        }
-        TargetFilter::Any => TargetFilter::Typed(TypedFilter::default().properties(vec![
-            FilterProp::Owned {
-                controller: ControllerRef::You,
-            },
-            FilterProp::NonToken,
-        ])),
         other => other,
     }
 }
@@ -1688,10 +1677,20 @@ fn parse_source_damage_threshold_this_turn(input: &str) -> OracleResult<'_, Stat
     let (rest, amount) = parse_number(rest)?;
     let (rest, _) = tag(" or more damage this turn").parse(rest)?;
 
+    // CR 120.9: "by a specific source controlled by X" — group damage records
+    // by source id then take the max per-source sum (matches "any one source"
+    // wording; damage from multiple sources is not combined).
     Ok((
         rest,
         make_quantity_ge(
-            QuantityRef::MaxDamageDealtThisTurnBySourceControlledBy { controller },
+            QuantityRef::DamageDealtThisTurn {
+                source: Box::new(TargetFilter::Typed(
+                    TypedFilter::default().controller(controller),
+                )),
+                target: Box::new(TargetFilter::Any),
+                aggregate: AggregateFunction::Max,
+                group_by: Some(DamageGroupKey::SourceId),
+            },
             amount,
         ),
     ))
@@ -3665,14 +3664,17 @@ mod tests {
                 assert_eq!(rhs, QuantityExpr::Fixed { value: 7 });
                 match lhs {
                     QuantityExpr::Ref {
-                        qty: QuantityRef::ObjectCountDistinctNames { filter },
-                    } => match filter {
-                        TargetFilter::Typed(t) => {
-                            assert_eq!(t.controller, Some(ControllerRef::You));
+                        qty: QuantityRef::ObjectCountDistinct { filter, qualities },
+                    } => {
+                        assert_eq!(qualities, vec![SharedQuality::Name]);
+                        match filter {
+                            TargetFilter::Typed(t) => {
+                                assert_eq!(t.controller, Some(ControllerRef::You));
+                            }
+                            _ => panic!("expected Typed filter, got {:?}", filter),
                         }
-                        _ => panic!("expected Typed filter, got {:?}", filter),
-                    },
-                    _ => panic!("expected ObjectCountDistinctNames, got {:?}", lhs),
+                    }
+                    _ => panic!("expected ObjectCountDistinct, got {:?}", lhs),
                 }
             }
             _ => panic!("expected QuantityComparison, got {:?}", c),
@@ -6021,13 +6023,22 @@ mod tests {
                 lhs:
                     QuantityExpr::Ref {
                         qty:
-                            QuantityRef::MaxDamageDealtThisTurnBySourceControlledBy {
-                                controller: ControllerRef::You,
+                            QuantityRef::DamageDealtThisTurn {
+                                source,
+                                target,
+                                aggregate: AggregateFunction::Max,
+                                group_by: Some(DamageGroupKey::SourceId),
                             },
                     },
                 comparator: Comparator::GE,
                 rhs: QuantityExpr::Fixed { value: 5 },
-            } => {}
+            } => {
+                let TargetFilter::Typed(typed) = *source else {
+                    panic!("expected typed source filter");
+                };
+                assert_eq!(typed.controller, Some(ControllerRef::You));
+                assert_eq!(*target, TargetFilter::Any);
+            }
             other => panic!("expected source-damage threshold quantity, got {other:?}"),
         }
     }
@@ -6041,7 +6052,13 @@ mod tests {
             StaticCondition::QuantityComparison {
                 lhs:
                     QuantityExpr::Ref {
-                        qty: QuantityRef::DamageDealtThisTurn { source, target },
+                        qty:
+                            QuantityRef::DamageDealtThisTurn {
+                                source,
+                                target,
+                                aggregate: AggregateFunction::Sum,
+                                group_by: None,
+                            },
                     },
                 comparator: Comparator::GE,
                 rhs: QuantityExpr::Fixed { value: 1 },
@@ -6067,6 +6084,8 @@ mod tests {
                     qty: QuantityRef::DamageDealtThisTurn {
                         source,
                         target,
+                        aggregate: AggregateFunction::Sum,
+                        group_by: None,
                     },
                 },
                 comparator: Comparator::GE,
@@ -7083,5 +7102,62 @@ mod tests {
             AggregateProperty(crate::types::ability::ObjectProperty::Toughness),
             10,
         );
+    }
+
+    /// CR 109.5: `add_owned_you_with_props` is the unified replacement for the
+    /// prior `add_owned_you` / `add_owned_you_non_token` pair. With an empty
+    /// extras slice it must produce only the `Owned { You }` tag (the bare
+    /// "owned by you" shape); with `&[FilterProp::NonToken]` it must additionally
+    /// carry the `NonToken` tag. Both `Typed` inputs and `Any` (lifted to a
+    /// fresh `Typed` filter) must follow the same uniqueness rule.
+    #[test]
+    fn add_owned_you_with_props_matches_legacy_helper_shapes() {
+        // Empty extras + Any input → fresh Typed filter with Owned only.
+        let owned_only = add_owned_you_with_props(TargetFilter::Any, &[]);
+        assert_eq!(
+            owned_only,
+            TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Owned {
+                controller: ControllerRef::You,
+            }])),
+        );
+
+        // NonToken extras + Any input → Owned + NonToken in that order.
+        let owned_non_token = add_owned_you_with_props(TargetFilter::Any, &[FilterProp::NonToken]);
+        assert_eq!(
+            owned_non_token,
+            TargetFilter::Typed(TypedFilter::default().properties(vec![
+                FilterProp::Owned {
+                    controller: ControllerRef::You,
+                },
+                FilterProp::NonToken,
+            ])),
+        );
+
+        // Typed input that already carries an `Owned { Opponent }` tag must NOT
+        // gain a second `Owned` entry — variant-tag uniqueness, not value
+        // equality. This mirrors the legacy `matches!(p, FilterProp::Owned { .. })`
+        // presence check.
+        let pre_owned =
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Owned {
+                controller: ControllerRef::Opponent,
+            }]));
+        let after = add_owned_you_with_props(pre_owned.clone(), &[FilterProp::NonToken]);
+        match after {
+            TargetFilter::Typed(typed) => {
+                let owned_count = typed
+                    .properties
+                    .iter()
+                    .filter(|p| matches!(p, FilterProp::Owned { .. }))
+                    .count();
+                assert_eq!(owned_count, 1, "must not duplicate Owned tag");
+                assert!(typed.properties.contains(&FilterProp::NonToken));
+            }
+            other => panic!("expected Typed, got {other:?}"),
+        }
+
+        // Non-typed/non-Any inputs (e.g., Player) must pass through unchanged
+        // — owner-tagging is meaningless on those shapes.
+        let unchanged = add_owned_you_with_props(TargetFilter::Player, &[FilterProp::NonToken]);
+        assert_eq!(unchanged, TargetFilter::Player);
     }
 }

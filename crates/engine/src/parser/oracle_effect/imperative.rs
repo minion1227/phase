@@ -3303,6 +3303,7 @@ pub(super) fn with_shuffle_sub_ability(effect: Effect) -> ParsedEffectClause {
         multi_target: None,
         condition: None,
         optional: false,
+        unless_pay: None,
     }
 }
 
@@ -3557,11 +3558,11 @@ pub(super) fn parse_counter_ast(text: &str, lower: &str) -> Option<ZoneCounterIm
         || (mass_consumed && abilities_head(rest).is_ok());
     if abilities_match {
         // CR 118.12: Parse "unless pays" even for ability counters.
-        let unless_payment = super::parse_unless_payment(rest);
+        let unless_pay = super::parse_unless_payment(rest).map(super::counter_unless_pay_modifier);
         return Some(ZoneCounterImperativeAst::Counter {
             target: TargetFilter::StackAbility,
             source_static: None,
-            unless_payment,
+            unless_pay,
             all: mass_consumed,
         });
     }
@@ -3575,11 +3576,11 @@ pub(super) fn parse_counter_ast(text: &str, lower: &str) -> Option<ZoneCounterIm
         target
     };
     // CR 118.12: Parse "unless its controller pays {X}" for conditional counters
-    let unless_payment = super::parse_unless_payment(rest);
+    let unless_pay = super::parse_unless_payment(rest).map(super::counter_unless_pay_modifier);
     Some(ZoneCounterImperativeAst::Counter {
         target,
         source_static: None,
-        unless_payment,
+        unless_pay,
         all: mass_consumed,
     })
 }
@@ -4831,6 +4832,36 @@ pub(crate) fn try_parse_coin_flip_branch(text: &str) -> Option<(bool, &str)> {
 
 pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEffectClause {
     match ast {
+        // CR 118.12: A Counter with an "unless [player] pays [cost]" modifier
+        // — intercepted here so the modifier propagates to
+        // `ParsedEffectClause.unless_pay`. The Effect itself becomes the
+        // modifier-free `Effect::Counter`; runtime resolution flows through
+        // the unified `ResolvedAbility.unless_pay` pipeline rather than a
+        // counter-specific bespoke branch.
+        ImperativeFamilyAst::ZoneCounter(ZoneCounterImperativeAst::Counter {
+            target,
+            source_static,
+            unless_pay: Some(unless_pay),
+            all,
+        }) => {
+            let effect = if all {
+                // CR 701.6 + CR 405.1: Mass counter drops both source_static
+                // and unless_pay (no corpus card combines them with mass
+                // counter, and mass counter is non-targeting per CR 115.1).
+                Effect::CounterAll { target }
+            } else {
+                Effect::Counter {
+                    target,
+                    source_static: source_static.map(|s| *s),
+                }
+            };
+            let mut clause = parsed_clause(effect);
+            // For mass counter, unless_pay is meaningless — drop it.
+            if !all {
+                clause.unless_pay = Some(unless_pay);
+            }
+            clause
+        }
         // CR 122.1 + CR 608.2c: Multi-typed counter list → PutCounter chain.
         // Intercepted here (rather than in lower_zone_counter_ast which returns
         // a bare Effect) because the chain requires a sub_ability linkage that
@@ -5249,23 +5280,28 @@ pub(super) fn lower_zone_counter_ast(ast: ZoneCounterImperativeAst) -> Effect {
         ZoneCounterImperativeAst::Counter {
             target,
             source_static,
-            unless_payment,
+            // CR 118.12: An unless-pay-bearing Counter is intercepted in
+            // `lower_imperative_family_ast` so the modifier flows into
+            // `ParsedEffectClause.unless_pay`. By the time we reach this
+            // bare-Effect lowering site, `unless_pay` is always None — the
+            // ParsedEffectClause-aware paths consumed it. This is the
+            // sub_ability-less fallback for the (rare) case the Counter is
+            // routed through `TargetedImperativeAst::ZoneCounterProxy`
+            // directly without going through `lower_imperative_family_ast`.
+            unless_pay: _,
             all,
         } => {
             if all {
-                // CR 701.6 + CR 405.1: Mass counter. Drops `source_static` and
-                // `unless_payment` — neither has a corpus card combining them
-                // with mass counter, and the runtime resolver does not honor
-                // those slots on `Effect::CounterAll`. (Source-static is a
-                // per-target-permanent silencing pattern; unless-pays is a
-                // controller opt-out that doesn't apply to non-targeting
-                // mass effects per CR 115.1.)
+                // CR 701.6 + CR 405.1: Mass counter. Drops `source_static` —
+                // no corpus card combines a source_static with mass counter,
+                // and the runtime resolver does not honor that slot on
+                // `Effect::CounterAll`. (Source-static is a per-target-
+                // permanent silencing pattern.)
                 Effect::CounterAll { target }
             } else {
                 Effect::Counter {
                     target,
                     source_static: source_static.map(|s| *s),
-                    unless_payment,
                 }
             }
         }

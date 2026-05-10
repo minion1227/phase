@@ -431,8 +431,19 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                 parts.push(format!("{value}").to_lowercase());
             }
             FilterProp::IsChosenCreatureType => parts.push("chosen creature type".into()),
-            FilterProp::MostPrevalentCreatureTypeInLibrary => {
-                parts.push("most prevalent creature type in library".into());
+            FilterProp::MostPrevalentCreatureTypeIn { zone, scope } => {
+                let scope_str = match scope {
+                    ControllerRef::You => "your",
+                    ControllerRef::Opponent => "opponent's",
+                    ControllerRef::ScopedPlayer => "that player's",
+                    ControllerRef::TargetPlayer => "target player's",
+                    ControllerRef::ParentTargetController => "parent target's",
+                    ControllerRef::DefendingPlayer => "defending player's",
+                };
+                let zone_str = format!("{zone:?}").to_lowercase();
+                parts.push(format!(
+                    "most prevalent creature type in {scope_str} {zone_str}"
+                ));
             }
             FilterProp::IsChosenCardType => parts.push("chosen card type".into()),
             FilterProp::IsChosenLandOrNonlandKind => parts.push("chosen land/nonland kind".into()),
@@ -726,8 +737,17 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
         QuantityRef::StartingLifeTotal => "starting life total".into(),
         QuantityRef::Speed => "speed".into(),
         QuantityRef::ObjectCount { filter } => format!("# of {}", fmt_target(filter)),
-        QuantityRef::ObjectCountDistinctNames { filter } => {
-            format!("# of distinctly-named {}", fmt_target(filter))
+        QuantityRef::ObjectCountDistinct { filter, qualities } => {
+            let quality_str = if qualities.iter().all(|q| matches!(q, SharedQuality::Name)) {
+                "distinctly-named".into()
+            } else {
+                let parts: Vec<String> = qualities
+                    .iter()
+                    .map(|q| format!("{q:?}").to_lowercase())
+                    .collect();
+                format!("distinct-{}", parts.join("-"))
+            };
+            format!("# of {} {}", quality_str, fmt_target(filter))
         }
         QuantityRef::PlayerCount { filter } => format!("# of {}", fmt_player_filter(filter)),
         QuantityRef::CountersOn {
@@ -909,12 +929,19 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
                 fmt_target(filter)
             )
         }
-        QuantityRef::MaxDamageDealtThisTurnBySourceControlledBy { controller } => {
-            format!("max damage this turn by {controller:?} source")
-        }
-        QuantityRef::DamageDealtThisTurn { source, target } => {
+        QuantityRef::DamageDealtThisTurn {
+            source,
+            target,
+            aggregate,
+            group_by,
+        } => {
+            let group = match group_by {
+                None => "ungrouped".to_string(),
+                Some(crate::types::ability::DamageGroupKey::SourceId) => "by-source".to_string(),
+            };
             format!(
-                "damage dealt this turn ({} -> {})",
+                "{} damage dealt this turn ({} -> {}) [{group}]",
+                fmt_aggregate_function(*aggregate),
                 fmt_target(source),
                 fmt_target(target)
             )
@@ -4686,7 +4713,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::StartingLifeTotal => ("StartingLifeTotal", Unhandled),
         QuantityRef::Speed => ("Speed", Handled),
         QuantityRef::ObjectCount { .. } => ("ObjectCount", Handled),
-        QuantityRef::ObjectCountDistinctNames { .. } => ("ObjectCountDistinctNames", Handled),
+        QuantityRef::ObjectCountDistinct { .. } => ("ObjectCountDistinct", Handled),
         QuantityRef::PlayerCount { .. } => ("PlayerCount", Handled),
         QuantityRef::CountersOn { .. } => ("CountersOn", Handled),
         QuantityRef::CountersOnObjects { .. } => ("CountersOnObjects", Handled),
@@ -4758,9 +4785,6 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::LifeGainedThisTurn { .. } => ("LifeGainedThisTurn", Handled),
         QuantityRef::CardsDrawnThisTurn { .. } => ("CardsDrawnThisTurn", Handled),
         QuantityRef::ZoneChangeCountThisTurn { .. } => ("ZoneChangeCountThisTurn", Handled),
-        QuantityRef::MaxDamageDealtThisTurnBySourceControlledBy { .. } => {
-            ("MaxDamageDealtThisTurnBySourceControlledBy", Handled)
-        }
         QuantityRef::DamageDealtThisTurn { .. } => ("DamageDealtThisTurn", Handled),
         QuantityRef::TurnsTaken => ("TurnsTaken", Unhandled),
         QuantityRef::ChosenNumber => ("ChosenNumber", Unhandled),
@@ -5485,15 +5509,11 @@ impl<'a> ParsedElement<'a> {
         }
     }
 
-    /// Check if this element has an "unless" payment (Counter with unless_payment, or
-    /// trigger-level unless_pay).
+    /// Check if this element has an "unless" payment. Post-2026-05-09 fold,
+    /// the unless modifier lives uniformly on `AbilityDefinition.unless_pay`
+    /// (regardless of whether it's a counter, tax, or ward).
     fn has_unless(&self) -> bool {
-        let unless_pred = |d: &AbilityDefinition| -> bool {
-            matches!(
-                &*d.effect,
-                Effect::Counter { unless_payment, .. } if unless_payment.is_some()
-            )
-        };
+        let unless_pred = |d: &AbilityDefinition| -> bool { d.unless_pay.is_some() };
         match self {
             ParsedElement::Ability(a) => ability_tree_any(a, &unless_pred),
             ParsedElement::Trigger(t) => {

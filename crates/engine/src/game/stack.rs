@@ -441,9 +441,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                     // Sets `state.waiting_for` to the resulting prompt, if any — the
                     // caller's post-stack resolution checks waiting_for before returning
                     // priority. Without this drain the choice would be silently dropped.
-                    if state.post_replacement_effect.is_some()
-                        || state.post_replacement_resolved_effect.is_some()
-                    {
+                    if state.post_replacement_continuation.is_some() {
                         state.post_replacement_source = None;
                         let _ = super::engine_replacement::apply_pending_post_replacement_effect(
                             state,

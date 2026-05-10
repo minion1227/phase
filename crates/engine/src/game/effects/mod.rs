@@ -4,9 +4,9 @@ use std::collections::HashMap;
 use crate::game::filter;
 use crate::game::speed::has_max_speed;
 use crate::types::ability::{
-    AbilityCondition, AbilityKind, ControllerRef, Effect, EffectError, EffectKind, FilterProp,
-    PlayerFilter, QuantityExpr, QuantityRef, ResolvedAbility, SharedQuality, SharedQualityRelation,
-    TargetFilter, TargetRef, UnlessCost,
+    AbilityCondition, AbilityCost, AbilityKind, ControllerRef, Effect, EffectError, EffectKind,
+    FilterProp, PlayerFilter, QuantityExpr, QuantityRef, ResolvedAbility, SharedQuality,
+    SharedQualityRelation, TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
@@ -1137,10 +1137,7 @@ pub(crate) fn resolve_player_for_context_ref(
     // an actual triggered context (where the helper at `targeting.rs:265`
     // succeeds) wins over chain inheritance.
     if matches!(target_filter, TargetFilter::ParentTargetController) {
-        if let Some(player) = ability.targets.iter().find_map(|target| match target {
-            TargetRef::Object(id) => state.objects.get(id).map(|obj| obj.controller),
-            TargetRef::Player(player) => Some(*player),
-        }) {
+        if let Some(player) = crate::game::ability_utils::parent_target_controller(ability, state) {
             return player;
         }
     }
@@ -1630,65 +1627,64 @@ pub fn resolve_ability_chain(
         return Ok(());
     }
 
-    // CR 118.12: "Effect unless [player] pays {cost}" — tax trigger modifier.
+    // CR 118.12 + CR 118.12a: "Effect unless [player] pays {cost}" —
+    // intercepted here for both tax triggers and counter-target-spell unless
+    // costs. Post-fold, the cost is the unified `AbilityCost` taxonomy.
     if let Some(ref unless_pay) = ability.unless_pay {
         if let Some(payer) = resolve_unless_payer(state, ability, &unless_pay.payer) {
-            // CR 702.21a: Non-mana costs (PayLife, DiscardCard, Sacrifice) bypass
-            // mana resolution — pass through to UnlessPayment directly.
-            match &unless_pay.cost {
-                UnlessCost::PayLife { .. }
-                | UnlessCost::PayEnergy { .. }
-                | UnlessCost::DiscardCard { .. }
-                | UnlessCost::Sacrifice { .. }
-                | UnlessCost::ReturnToHand { .. } => {
-                    let mut pending = ability.clone();
-                    pending.unless_pay = None;
-                    state.waiting_for = WaitingFor::UnlessPayment {
-                        player: payer,
-                        cost: unless_pay.cost.clone(),
-                        pending_effect: Box::new(pending),
-                        trigger_event: state.current_trigger_event.clone(),
-                        effect_description: ability.description.clone(),
-                    };
-                    return Ok(());
-                }
-                _ => {}
-            }
+            // CR 118.4 + CR 107.3c: Resolve a dynamic-generic mana cost into a
+            // fixed `Mana { cost }` BEFORE entering the prompt — the runtime
+            // payment site only handles static AbilityCost variants.
             let resolved_cost = match &unless_pay.cost {
-                UnlessCost::Fixed { cost } => cost.clone(),
-                UnlessCost::DynamicGeneric { quantity } => {
+                AbilityCost::ManaDynamic { quantity } => {
+                    // CR 107.1b: Read the caster-chosen X via the ability's
+                    // resolution context.
                     let amount = crate::game::quantity::resolve_quantity(
                         state,
                         quantity,
                         ability.controller,
                         ability.source_id,
                     );
-                    ManaCost::generic(amount.max(0) as u32)
+                    AbilityCost::Mana {
+                        cost: ManaCost::generic(amount.max(0) as u32),
+                    }
                 }
-                // Non-mana costs handled above.
-                UnlessCost::PayLife { .. }
-                | UnlessCost::PayEnergy { .. }
-                | UnlessCost::DiscardCard { .. }
-                | UnlessCost::Sacrifice { .. }
-                | UnlessCost::ReturnToHand { .. } => unreachable!(),
+                other => other.clone(),
             };
-            // CR 118.5: If the cost is {0}, the player is considered to have paid.
-            if resolved_cost != ManaCost::zero() {
-                // Strip unless_pay from the pending effect to prevent re-prompting.
+            // CR 118.5 + CR 118.12a: Zero-mana unless cost short-circuit.
+            // Pre-fold (2026-05-09 audit) the counter and tax/trigger paths
+            // had divergent behavior here:
+            //   - The counter-specific resolver treated `{0}` as "the
+            //     spell-controller paid; the spell survives" (per CR 118.5,
+            //     "players can always pay 0"). This matches the player's
+            //     real-world choice to always pay 0.
+            //   - The generic tax-trigger path fell through and executed the
+            //     effect anyway (no opt-out offered).
+            // The fold preserves both behaviors verbatim to keep this batch
+            // strictly architectural; harmonizing them is tracked separately.
+            if matches!(&resolved_cost, AbilityCost::Mana { cost } if *cost == ManaCost::zero()) {
+                if matches!(ability.effect, Effect::Counter { .. }) {
+                    // Counter is prevented — spell survives.
+                    events.push(GameEvent::EffectResolved {
+                        kind: EffectKind::Counter,
+                        source_id: ability.source_id,
+                    });
+                    return Ok(());
+                }
+                // Non-counter unless-modified effects: pre-fold behavior was
+                // to fall through and execute the effect.
+            } else {
                 let mut pending = ability.clone();
                 pending.unless_pay = None;
                 state.waiting_for = WaitingFor::UnlessPayment {
                     player: payer,
-                    cost: UnlessCost::Fixed {
-                        cost: resolved_cost,
-                    },
+                    cost: resolved_cost,
                     pending_effect: Box::new(pending),
                     trigger_event: state.current_trigger_event.clone(),
                     effect_description: ability.description.clone(),
                 };
                 return Ok(());
             }
-            // Cost is {0} — fall through and execute the effect normally.
         }
     }
 
@@ -2050,6 +2046,33 @@ pub fn resolve_ability_chain(
                 let target_slots = crate::game::ability_utils::build_target_slots(state, sub)
                     .map_err(|e| EffectError::InvalidParam(e.to_string()))?;
                 if !target_slots.is_empty() {
+                    // CR 115.1 + CR 701.9b: Random-mode reflexive triggers (WhenYouDo /
+                    // QuantityCheck) auto-resolve via the seeded RNG. Same shape as
+                    // casting/activation: no `WaitingFor::TriggerTargetSelection` is
+                    // emitted; the chosen targets are assigned and the resolution
+                    // continues inline.
+                    if matches!(
+                        sub.target_selection_mode,
+                        crate::types::ability::TargetSelectionMode::Random
+                    ) {
+                        let chosen = crate::game::ability_utils::random_select_targets_for_ability(
+                            state,
+                            &target_slots,
+                            &[],
+                        )
+                        .map_err(|e| EffectError::InvalidParam(e.to_string()))?;
+                        let mut reflexive = sub.as_ref().clone();
+                        reflexive.context = ability.context.clone();
+                        crate::game::ability_utils::assign_targets_in_chain(
+                            state,
+                            &mut reflexive,
+                            &chosen,
+                        )
+                        .map_err(|e| EffectError::InvalidParam(e.to_string()))?;
+                        resolve_ability_chain(state, &reflexive, events, depth + 1)?;
+                        return Ok(());
+                    }
+
                     // Compute selection first — if this fails (no legal targets for a
                     // required slot), we skip the reflexive trigger cleanly without
                     // leaving an orphaned pending_trigger.
@@ -2543,8 +2566,36 @@ fn resolve_unless_payer(
                     GameEvent::PlayerPerformedAction { player_id, .. } => Some(*player_id),
                     _ => None,
                 })
+                // CR 702.21a: Fall back to broader event-context resolution
+                // (handles `BecomesTarget` for ward, etc.) when the narrow
+                // matches above don't apply.
+                .or_else(|| {
+                    crate::game::targeting::resolve_event_context_target(
+                        state,
+                        payer,
+                        ability.source_id,
+                    )
+                    .and_then(|target| match target {
+                        TargetRef::Player(p) => Some(p),
+                        _ => None,
+                    })
+                })
         }
         TargetFilter::Controller => Some(state.active_player),
+        // CR 702.21a + CR 603.7c: Ward firing on `BecomesTarget` produces a
+        // counter ability whose unless-payer is the controller of the
+        // offending spell — resolved via the trigger event's source object.
+        TargetFilter::TriggeringSpellController => {
+            crate::game::targeting::resolve_event_context_target(state, payer, ability.source_id)
+                .and_then(|target| match target {
+                    TargetRef::Player(p) => Some(p),
+                    _ => None,
+                })
+        }
+        // CR 118.12 + CR 608.2c: "Counter target spell unless its controller
+        // pays {X}" (Mana Leak) — `ParentTargetController` reads the
+        // controller of the targeted spell (the parent ability's first
+        // target), which `resolve_effect_player_ref` looks up via the stack.
         TargetFilter::ParentTargetController => {
             crate::game::targeting::resolve_effect_player_ref(state, ability, payer)
         }

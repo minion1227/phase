@@ -204,12 +204,9 @@ fn controller_ref_player(
                 TargetRef::Object(_) => None,
             })
         }),
-        ControllerRef::ParentTargetController => ability.and_then(|a| {
-            a.targets.iter().find_map(|t| match t {
-                TargetRef::Object(id) => state.objects.get(id).map(|obj| obj.controller),
-                TargetRef::Player(pid) => Some(*pid),
-            })
-        }),
+        ControllerRef::ParentTargetController => {
+            ability.and_then(|a| crate::game::ability_utils::parent_target_controller(a, state))
+        }
         ControllerRef::DefendingPlayer => {
             crate::game::combat::defending_player_for_attacker(state, source_id)
         }
@@ -502,12 +499,7 @@ fn filter_inner_for_object(
                     }
                     ControllerRef::ParentTargetController => {
                         let target_player = ability.and_then(|a| {
-                            a.targets.iter().find_map(|t| match t {
-                                TargetRef::Object(id) => {
-                                    state.objects.get(id).map(|obj| obj.controller)
-                                }
-                                TargetRef::Player(pid) => Some(*pid),
-                            })
+                            crate::game::ability_utils::parent_target_controller(a, state)
                         });
                         match target_player {
                             Some(pid) if pid == obj.controller => {}
@@ -772,12 +764,7 @@ fn zone_change_filter_inner(
                     }
                     ControllerRef::ParentTargetController => {
                         let target_player = ability.and_then(|a| {
-                            a.targets.iter().find_map(|t| match t {
-                                TargetRef::Object(id) => {
-                                    state.objects.get(id).map(|obj| obj.controller)
-                                }
-                                TargetRef::Player(pid) => Some(*pid),
-                            })
+                            crate::game::ability_utils::parent_target_controller(a, state)
                         });
                         match target_player {
                             Some(pid) if pid == record.controller => {}
@@ -1183,7 +1170,7 @@ fn spell_cast_record_from_object(spell_obj: &GameObject) -> SpellCastRecord {
         colors: spell_obj.color.clone(),
         mana_value: spell_obj.mana_cost.mana_value(),
         has_x_in_cost: crate::game::casting_costs::cost_has_x(&spell_obj.mana_cost),
-        from_zone: Some(spell_obj.zone),
+        from_zone: spell_obj.zone,
     }
 }
 
@@ -1336,7 +1323,7 @@ fn spell_object_matches_property(
                     )
                 })
         }),
-        FilterProp::MostPrevalentCreatureTypeInLibrary => false,
+        FilterProp::MostPrevalentCreatureTypeIn { .. } => false,
         FilterProp::IsChosenColor => context.is_some_and(|context| {
             context
                 .state
@@ -1464,7 +1451,7 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         // for this snapshot shape.
         FilterProp::Token => false,
         FilterProp::NonToken => true,
-        FilterProp::InZone { zone: required } => record.from_zone == Some(*required),
+        FilterProp::InZone { zone: required } => record.from_zone == *required,
         // All remaining props require on-battlefield or stack state unavailable from a snapshot.
         FilterProp::Attacking
         | FilterProp::AttackingController
@@ -1491,7 +1478,7 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         | FilterProp::ToughnessGE { .. }
         | FilterProp::PowerGTSource
         | FilterProp::IsChosenCreatureType
-        | FilterProp::MostPrevalentCreatureTypeInLibrary
+        | FilterProp::MostPrevalentCreatureTypeIn { .. }
         | FilterProp::IsChosenColor
         | FilterProp::IsChosenCardType
         | FilterProp::IsChosenLandOrNonlandKind
@@ -1836,12 +1823,7 @@ fn matches_filter_prop(
                 .is_some_and(|pid| pid == obj.owner),
             ControllerRef::ParentTargetController => source
                 .ability
-                .and_then(|a| {
-                    a.targets.iter().find_map(|t| match t {
-                        TargetRef::Object(id) => state.objects.get(id).map(|obj| obj.controller),
-                        TargetRef::Player(pid) => Some(*pid),
-                    })
-                })
+                .and_then(|a| crate::game::ability_utils::parent_target_controller(a, state))
                 .is_some_and(|pid| pid == obj.owner),
             ControllerRef::DefendingPlayer => {
                 crate::game::combat::defending_player_for_attacker(state, source.id)
@@ -2022,8 +2004,16 @@ fn matches_filter_prop(
                 .any(|s| s.eq_ignore_ascii_case(chosen)),
             None => false,
         },
-        FilterProp::MostPrevalentCreatureTypeInLibrary => {
-            most_prevalent_creature_types_in_library(state, obj.owner)
+        // CR 205.3m + CR 701.23a: Object's creature type ties for highest count
+        // among creature cards in the named player's named zone. Scope picks
+        // the player whose zone is inspected; `Opponent` falls back to the
+        // candidate object's owner (search-context invariant — the candidate
+        // already lives in the inspected zone, so its owner IS that player).
+        FilterProp::MostPrevalentCreatureTypeIn { zone, scope } => {
+            let owner =
+                controller_ref_player(state, source.id, source.controller, source.ability, scope)
+                    .unwrap_or(obj.owner);
+            most_prevalent_creature_types_in_zone(state, owner, *zone)
                 .into_iter()
                 .any(|creature_type| {
                     subtype_matches_with_changeling(
@@ -2140,8 +2130,16 @@ fn matches_filter_prop(
                 }
             }
         }
-        // CR 510.1: Object was dealt damage this turn (damage_marked persists until cleanup).
-        FilterProp::WasDealtDamageThisTurn => obj.damage_marked > 0,
+        // CR 120.6 + CR 120.9: "Was dealt damage this turn" is a historical fact,
+        // not a query against current marked damage. CR 120.6 removes marked damage
+        // when a permanent regenerates and during the cleanup step, so reading
+        // `damage_marked` would silently lose the fact for any creature that had
+        // regenerated. The damage-event history (CR 120.9 establishes "dealt damage"
+        // as the per-source historical record) is the authoritative source.
+        FilterProp::WasDealtDamageThisTurn => state
+            .damage_dealt_this_turn
+            .iter()
+            .any(|record| matches!(record.target, TargetRef::Object(id) if id == object_id)),
         // CR 400.7: Object entered the battlefield this turn.
         FilterProp::EnteredThisTurn => obj.entered_battlefield_turn == Some(state.turn_number),
         FilterProp::ZoneChangedThisTurn { from, to } => {
@@ -2309,12 +2307,7 @@ fn zone_change_record_matches_property(
                 .is_some_and(|pid| pid == record.owner),
             ControllerRef::ParentTargetController => source
                 .ability
-                .and_then(|a| {
-                    a.targets.iter().find_map(|t| match t {
-                        TargetRef::Object(id) => state.objects.get(id).map(|obj| obj.controller),
-                        TargetRef::Player(pid) => Some(*pid),
-                    })
-                })
+                .and_then(|a| crate::game::ability_utils::parent_target_controller(a, state))
                 .is_some_and(|pid| pid == record.owner),
             ControllerRef::DefendingPlayer => {
                 crate::game::combat::defending_player_for_attacker(state, source.id)
@@ -2328,7 +2321,7 @@ fn zone_change_record_matches_property(
                 .iter()
                 .any(|candidate| candidate.eq_ignore_ascii_case(chosen))
         }),
-        FilterProp::MostPrevalentCreatureTypeInLibrary => false,
+        FilterProp::MostPrevalentCreatureTypeIn { .. } => false,
         // CR 509.1b: Power comparison against the live source.
         FilterProp::PowerGTSource => {
             let source_power = state
@@ -2484,12 +2477,7 @@ fn attachment_controller_matches(
             .is_some_and(|pid| pid == attachment_controller),
         Some(ControllerRef::ParentTargetController) => source
             .ability
-            .and_then(|a| {
-                a.targets.iter().find_map(|t| match t {
-                    TargetRef::Object(id) => state.objects.get(id).map(|obj| obj.controller),
-                    TargetRef::Player(pid) => Some(*pid),
-                })
-            })
+            .and_then(|a| crate::game::ability_utils::parent_target_controller(a, state))
             .is_some_and(|pid| pid == attachment_controller),
         Some(ControllerRef::DefendingPlayer) => {
             combat::defending_player_for_attacker(state, source.id)
@@ -2601,6 +2589,18 @@ fn shared_quality_values(
             .map(|subtype| subtype.to_ascii_lowercase())
             .collect(),
     }
+}
+
+/// CR 201.2 + CR 603.4: Public re-export of the per-object quality extractor.
+/// Used by the `QuantityRef::ObjectCountDistinct` resolver so the
+/// count-expression side and the constraint side share one vocabulary for
+/// `SharedQuality` value semantics.
+pub fn object_shared_quality_values_public(
+    obj: &GameObject,
+    quality: &SharedQuality,
+    all_creature_types: &[String],
+) -> HashSet<String> {
+    object_shared_quality_values(obj, quality, all_creature_types)
 }
 
 fn object_shared_quality_values(
@@ -2742,16 +2742,30 @@ fn object_shares_quality_with_reference_filter(
     })
 }
 
-fn most_prevalent_creature_types_in_library(state: &GameState, owner: PlayerId) -> HashSet<String> {
-    let Some(player) = state.players.iter().find(|player| player.id == owner) else {
-        return HashSet::new();
-    };
-
-    let mut counts = HashMap::new();
-    for object_id in &player.library {
-        let Some(obj) = state.objects.get(object_id) else {
+/// CR 205.3m + CR 701.23a: Compute the creature subtypes tied for highest
+/// occurrence among creature cards in `owner`'s `zone`. CR 205.3m defines
+/// the creature-subtype set being counted. A `Changeling` (CR 702.73a)
+/// creature counts toward every creature type, matching how the keyword
+/// interacts with subtype-counting effects on resolution.
+///
+/// Owner semantics are correct for hidden zones (library, hand) and
+/// graveyard/exile per CR 400 (zones are owned by players). Battlefield
+/// emission, if/when added, would need an explicit controller axis since
+/// owner ≠ controller for stolen permanents.
+fn most_prevalent_creature_types_in_zone(
+    state: &GameState,
+    owner: PlayerId,
+    zone: Zone,
+) -> HashSet<String> {
+    let object_ids = crate::game::targeting::zone_object_ids(state, zone);
+    let mut counts: HashMap<String, u32> = HashMap::new();
+    for object_id in object_ids {
+        let Some(obj) = state.objects.get(&object_id) else {
             continue;
         };
+        if obj.owner != owner {
+            continue;
+        }
         if !obj.card_types.core_types.contains(&CoreType::Creature) {
             continue;
         }
@@ -3101,6 +3115,47 @@ mod tests {
         assert!(matches_target_filter(&state, bird, &filter, bird));
     }
 
+    /// CR 120.6 + CR 120.9 (audit H2): "Was dealt damage this turn" must consult
+    /// the damage-event history, not `damage_marked`. Per CR 120.6 marked damage
+    /// is removed when the permanent regenerates, but the historical fact (CR 120.9)
+    /// survives — so a creature that was dealt damage and then regenerated must
+    /// still be a legal target for "destroy target creature that was dealt damage
+    /// this turn" (Fatal Blow). The pre-fix implementation read `damage_marked`
+    /// and silently lost the fact.
+    #[test]
+    fn was_dealt_damage_this_turn_survives_regeneration() {
+        use crate::types::game_state::DamageRecord;
+
+        let mut state = setup();
+        let creature = add_creature(&mut state, PlayerId(0), "Wall of Resistance");
+        let damage_source = add_creature(&mut state, PlayerId(1), "Goblin Piker");
+
+        // Push the historical record, then simulate regeneration (CR 120.6:
+        // "All damage marked on a permanent is removed when it regenerates").
+        state.damage_dealt_this_turn.push(DamageRecord {
+            source_id: damage_source,
+            source_controller: PlayerId(1),
+            target: TargetRef::Object(creature),
+            amount: 2,
+            is_combat: true,
+        });
+        state.objects.get_mut(&creature).unwrap().damage_marked = 0;
+
+        let filter = TargetFilter::Typed(
+            TypedFilter::creature().properties(vec![FilterProp::WasDealtDamageThisTurn]),
+        );
+        assert!(
+            matches_target_filter(&state, creature, &filter, creature),
+            "Fatal Blow target must remain legal after the creature regenerates"
+        );
+
+        // Negative control: an undamaged creature does not match.
+        let untouched = add_creature(&mut state, PlayerId(0), "Grizzly Bears");
+        assert!(!matches_target_filter(
+            &state, untouched, &filter, untouched
+        ));
+    }
+
     #[test]
     fn spell_record_matches_qualified_filter() {
         let record = SpellCastRecord {
@@ -3111,7 +3166,7 @@ mod tests {
             colors: vec![ManaColor::Blue],
             mana_value: 3,
             has_x_in_cost: false,
-            from_zone: None,
+            from_zone: Zone::Hand,
         };
         let filter = TargetFilter::Typed(
             TypedFilter::creature()
@@ -3150,11 +3205,11 @@ mod tests {
             colors: vec![],
             mana_value: 3,
             has_x_in_cost: true,
-            from_zone: None,
+            from_zone: Zone::Hand,
         };
         let non_x_record = SpellCastRecord {
             has_x_in_cost: false,
-            from_zone: None,
+            from_zone: Zone::Hand,
             ..x_record.clone()
         };
         let filter = TargetFilter::Typed(
@@ -3180,10 +3235,10 @@ mod tests {
             colors: vec![],
             mana_value: 2,
             has_x_in_cost: false,
-            from_zone: Some(Zone::Hand),
+            from_zone: Zone::Hand,
         };
         let exile_record = SpellCastRecord {
-            from_zone: Some(Zone::Exile),
+            from_zone: Zone::Exile,
             ..hand_record.clone()
         };
         let filter = TargetFilter::Typed(
@@ -3976,10 +4031,12 @@ mod tests {
             obj.card_types.subtypes.push(subtype.to_string());
         }
 
-        let filter = TargetFilter::Typed(
-            TypedFilter::creature()
-                .properties(vec![FilterProp::MostPrevalentCreatureTypeInLibrary]),
-        );
+        let filter = TargetFilter::Typed(TypedFilter::creature().properties(vec![
+            FilterProp::MostPrevalentCreatureTypeIn {
+                zone: Zone::Library,
+                scope: ControllerRef::You,
+            },
+        ]));
 
         assert!(matches_target_filter(
             &state, goblin_one, &filter, goblin_one
@@ -5915,7 +5972,7 @@ mod tests {
                 colors: Vec::new(),
                 mana_value: 0,
                 has_x_in_cost: false,
-                from_zone: None,
+                from_zone: Zone::Hand,
             }
         };
 
@@ -6311,7 +6368,7 @@ mod tests {
             colors: vec![],
             mana_value: 7,
             has_x_in_cost: false,
-            from_zone: None,
+            from_zone: Zone::Hand,
         };
         let dragon_filter = make_subtype_filter("Dragon");
         let plains_filter = make_subtype_filter("Plains");

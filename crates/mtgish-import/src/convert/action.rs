@@ -311,6 +311,12 @@ fn rewrite_bound_x_in_ability_cost(cost: &mut AbilityCost, binding: &QuantityExp
         | AbilityCost::Discard { count: amount, .. } => {
             rewrite_bound_x_in_quantity_expr(amount, binding)
         }
+        // CR 118.4 + CR 107.3c: Dynamic-generic mana costs carry their X via
+        // `quantity` and need the same X-binding rewrite as the per-amount
+        // variants above.
+        AbilityCost::ManaDynamic { quantity } => {
+            rewrite_bound_x_in_quantity_expr(quantity, binding)
+        }
         AbilityCost::Composite { costs } => costs
             .iter_mut()
             .map(|cost| rewrite_bound_x_in_ability_cost(cost, binding))
@@ -2714,7 +2720,6 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
         Action::CounterSpell(_spell) => Effect::Counter {
             target: TargetFilter::StackSpell,
             source_static: None,
-            unless_payment: None,
         },
 
         // CR 800.4 / CR 110.2: Gain control.

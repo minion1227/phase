@@ -7,7 +7,9 @@ use thiserror::Error;
 use super::card_type::{CardType, CoreType, Supertype};
 use super::counter::{CounterMatch, CounterType};
 use super::events::BendingType;
-use super::game_state::{DistributionUnit, LKISnapshot, MayTriggerOrigin, RetargetScope};
+use super::game_state::{
+    is_zero_usize, DistributionUnit, LKISnapshot, MayTriggerOrigin, RetargetScope,
+};
 use super::identifiers::ObjectId;
 use super::keywords::{Keyword, KeywordKind};
 use super::mana::{ManaColor, ManaCost, ManaType};
@@ -1540,10 +1542,24 @@ pub enum FilterProp {
     /// Matches objects whose subtypes include the source object's chosen creature type.
     /// Used for "of the chosen type" patterns (Cavern of Souls, Metallic Mimic).
     IsChosenCreatureType,
-    /// Matches creature cards that have a creature type tied for the highest
-    /// count among creature cards in their owner's library. Used by Alchemy
-    /// "most prevalent creature type in your library" seek filters.
-    MostPrevalentCreatureTypeInLibrary,
+    /// CR 205.3m + CR 701.23a: Matches creature cards whose creature type is
+    /// tied for the highest count among creature cards in the named player's
+    /// named zone. CR 205.3m defines the creature subtype set being counted;
+    /// CR 701.23a is the search mechanic that surfaces this filter.
+    /// Generalizes the original "most prevalent creature type in your library"
+    /// leaf so future variants (opponent's library, graveyard, etc.) reuse
+    /// this slot rather than spawning siblings.
+    ///
+    /// Backward compat: deserializes from the legacy tag
+    /// `MostPrevalentCreatureTypeInLibrary` (no fields) via `#[serde(alias)]`,
+    /// defaulting `zone = Library` and `scope = You`.
+    #[serde(alias = "MostPrevalentCreatureTypeInLibrary")]
+    MostPrevalentCreatureTypeIn {
+        #[serde(default = "default_most_prevalent_zone")]
+        zone: crate::types::zones::Zone,
+        #[serde(default = "default_most_prevalent_scope")]
+        scope: ControllerRef,
+    },
     /// Matches objects whose colors include the source object's chosen color.
     /// Used for "of the chosen color" patterns (Hall of Triumph, Runed Stalactite).
     /// Reads `ChosenAttribute::Color` from the source permanent.
@@ -1830,6 +1846,40 @@ impl TypedFilter {
 impl From<TypedFilter> for TargetFilter {
     fn from(f: TypedFilter) -> Self {
         TargetFilter::Typed(f)
+    }
+}
+
+/// CR 115.1 + CR 701.9b: How a target slot's referent is selected.
+///
+/// CR 115.1: Default — the spell/ability's controller chooses each target.
+/// CR 701.9b: Some effects override the controller-choice default by requiring
+/// the game to make the selection (analogous to "random discard" — the affected
+/// player does not choose). Magic Oracle text expresses this with the modifier
+/// "random target [predicate]" appearing immediately before the target word
+/// (Mana Clash, Goblin Lyre, Pixie Queen, Vexing Sphinx, Maddening Hex, etc.).
+///
+/// Categorical-boundary check (per CLAUDE.md "Parameterize, don't proliferate"):
+/// this enum is the *selection-mode* axis — one level above the predicate
+/// (`TargetFilter`) and orthogonal to slot count (`MultiTargetSpec`). It does
+/// not belong on `TargetFilter` (which captures *what* matches), nor on
+/// `MultiTargetSpec` (which captures *how many*). It captures *who selects*.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum TargetSelectionMode {
+    /// CR 115.1: The spell or ability's controller chooses each target.
+    #[default]
+    Chosen,
+    /// CR 701.9b (analogous): The game selects each target uniformly at random
+    /// from the legal-target set. The controller does not choose.
+    Random,
+}
+
+impl TargetSelectionMode {
+    /// Helper for `serde(skip_serializing_if = ...)` — the default `Chosen`
+    /// mode is omitted from card-data.json so existing card export shapes are
+    /// preserved exactly.
+    pub fn is_chosen(&self) -> bool {
+        matches!(self, TargetSelectionMode::Chosen)
     }
 }
 
@@ -2125,11 +2175,27 @@ pub enum QuantityRef {
     /// Count of objects on the battlefield matching a filter.
     /// Used for "for each creature you control" and similar patterns.
     ObjectCount { filter: TargetFilter },
-    /// CR 201.2 + CR 603.4: Count of distinct names among objects matching a
-    /// filter. Used for "seven or more lands with different names" (Field of
-    /// the Dead) and similar distinct-name threshold predicates. Two objects
-    /// with the same name count once.
-    ObjectCountDistinctNames { filter: TargetFilter },
+    /// CR 201.2 + CR 603.4: Count of objects matching a filter, deduplicated
+    /// by the listed shared qualities. `qualities = [Name]` is the canonical
+    /// "seven or more lands with different names" shape (Field of the Dead);
+    /// `qualities = [ManaValue]` covers "different mana values"; multiple
+    /// qualities form a tuple key (objects whose tuple values all coincide
+    /// count as one).
+    ///
+    /// Lifts the legacy `ObjectCountDistinctNames` leaf to the same
+    /// `Vec<SharedQuality>` axis already used by
+    /// `SearchSelectionConstraint::DistinctQualities` (Batch 1) so the
+    /// count-expression and constraint sides share one quality vocabulary.
+    ///
+    /// Backward compat: deserializes from the legacy tag
+    /// `ObjectCountDistinctNames` (single `filter` field) via
+    /// `#[serde(alias)]`, defaulting `qualities` to `vec![SharedQuality::Name]`.
+    #[serde(alias = "ObjectCountDistinctNames")]
+    ObjectCountDistinct {
+        filter: TargetFilter,
+        #[serde(default = "default_distinct_names")]
+        qualities: Vec<SharedQuality>,
+    },
     /// Count of players matching a player-level filter.
     /// Used for "for each opponent who lost life this turn" and similar patterns.
     PlayerCount { filter: PlayerFilter },
@@ -2379,18 +2445,29 @@ pub enum QuantityRef {
         to: Option<Zone>,
         filter: TargetFilter,
     },
-    /// CR 120.1 + CR 603.4: Greatest total damage dealt this turn by any one
-    /// source controlled by the referenced player. Used by intervening-if
-    /// phrases such as "if a source you controlled dealt 5 or more damage this
-    /// turn"; damage from multiple sources is not combined.
-    MaxDamageDealtThisTurnBySourceControlledBy { controller: ControllerRef },
-    /// CR 120.1 + CR 603.4: Total damage dealt this turn matching a source
-    /// object filter and a recipient filter. Used by intervening-if clauses
-    /// such as "if this creature dealt damage to an opponent this turn" and
-    /// "if this creature was dealt damage this turn".
+    /// CR 120.1 + CR 120.9 + CR 603.4: Damage dealt this turn matching a source
+    /// object filter and a recipient filter, optionally grouped by a key
+    /// (CR 120.9 "specific source") and aggregated.
+    ///
+    /// `group_by: None` sums every matching record's `amount`.
+    /// `group_by: Some(SourceId)` partitions matching records by `record.source_id`,
+    /// sums each partition, then applies `aggregate` across the per-group sums
+    /// (Max picks the largest single source's contribution; Sum equals the
+    /// ungrouped sum; Min picks the smallest).
+    ///
+    /// Used by intervening-if clauses such as "if this creature dealt damage to
+    /// an opponent this turn", "if this creature was dealt damage this turn",
+    /// and "if a source you controlled dealt 5 or more damage this turn".
     DamageDealtThisTurn {
         source: Box<TargetFilter>,
         target: Box<TargetFilter>,
+        #[serde(
+            default = "default_damage_aggregate",
+            skip_serializing_if = "is_default_damage_aggregate"
+        )]
+        aggregate: AggregateFunction,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        group_by: Option<DamageGroupKey>,
     },
     /// A number chosen as the source entered the battlefield (e.g., Talion, the Kindly Lord).
     /// Resolved from the source object's `ChosenAttribute::Number`.
@@ -2496,6 +2573,18 @@ pub enum AggregateFunction {
     Max,
     Min,
     Sum,
+}
+
+/// CR 120.9: Grouping key for damage-history aggregation. CR 120.9 distinguishes
+/// damage dealt "by a specific source" from damage in the aggregate, so any
+/// query that needs per-source partitioning before aggregation must select a
+/// key here. Today only `SourceId` is needed; future axes (e.g., per-target)
+/// fit cleanly as additional variants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum DamageGroupKey {
+    /// CR 120.9: Group records by `DamageRecord::source_id` so the resolver can
+    /// answer "the most damage dealt by any single source."
+    SourceId,
 }
 
 /// A measurable property of a game object for aggregate queries.
@@ -3282,6 +3371,15 @@ pub enum AbilityCost {
     Mana {
         cost: ManaCost,
     },
+    /// CR 118.4 + CR 107.3c: A mana cost whose generic component is determined
+    /// dynamically at the moment the cost is paid (e.g., "{X}, where X is this
+    /// creature's power"). The runtime resolves this into a fixed `ManaCost`
+    /// before the player is prompted to pay; this variant carries the dynamic
+    /// expression up to that resolution point. Distinct from `Mana { cost }`,
+    /// which is fully static.
+    ManaDynamic {
+        quantity: QuantityExpr,
+    },
     Tap,
     Untap,
     Loyalty {
@@ -3342,10 +3440,17 @@ pub enum AbilityCost {
     PaySpeed {
         amount: QuantityExpr,
     },
+    /// CR 118.12: Return N permanents matching `filter` to their owner's hand
+    /// as a cost. `from_zone` defaults to `None`, meaning battlefield (the
+    /// standard "return to hand" cost shape, e.g., "return a land you control
+    /// to its owner's hand"). Some unless-cost cards (Harvest Wurm) use
+    /// `Some(Zone::Graveyard)` to return cards from the graveyard instead.
     ReturnToHand {
         count: u32,
         #[serde(default)]
         filter: Option<TargetFilter>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from_zone: Option<Zone>,
     },
     /// CR 701.3d: Unattach this Equipment from the object it is equipping.
     /// Used by activated costs such as Sunforger's "Unattach this Equipment".
@@ -3429,6 +3534,7 @@ impl AbilityCost {
     pub fn categories(&self) -> Vec<CostCategory> {
         match self {
             AbilityCost::Mana { .. } => vec![CostCategory::ManaOnly],
+            AbilityCost::ManaDynamic { .. } => vec![CostCategory::ManaOnly],
             AbilityCost::Tap => vec![CostCategory::TapsSelf],
             AbilityCost::Untap => vec![CostCategory::UntapsSelf],
             AbilityCost::Loyalty { .. } => vec![CostCategory::PaysLoyalty],
@@ -3560,52 +3666,133 @@ pub enum SpellCastingOptionKind {
 }
 
 // ---------------------------------------------------------------------------
-// Unless Cost -- dynamic or static mana costs for "unless pays" effects
+// UnlessPayModifier -- the "unless [player] pays [cost]" wrapper
 // ---------------------------------------------------------------------------
 
-/// CR 118.12: Cost that may be static or resolved dynamically at payment time.
-/// Used by counter-unless-pays, tax triggers (Esper Sentinel, Rhystic Study),
-/// and ward costs (CR 702.21a).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type")]
-pub enum UnlessCost {
-    /// Fixed mana cost (e.g., "unless that player pays {1}")
-    Fixed { cost: ManaCost },
-    /// Generic mana equal to a dynamic quantity (e.g., "where X is this creature's power")
-    DynamicGeneric { quantity: QuantityExpr },
-    /// CR 702.21a: Pay life as ward cost (e.g., "Ward—Pay 2 life")
-    PayLife { amount: i32 },
-    /// CR 107.14 + CR 118.12: Remove fixed energy counters as an unless cost.
-    PayEnergy { amount: u32 },
-    /// CR 701.9 + CR 702.21a: The resolved `UnlessPayModifier::payer`
-    /// discards a card as an unless/ward cost. `filter: None` means any card
-    /// in that payer's hand is eligible; `Some` restricts the eligible hand
-    /// cards by type/subtype/supertype.
-    DiscardCard {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        filter: Option<TargetFilter>,
-    },
-    /// CR 702.21a: Sacrifice N permanents matching a filter as ward cost.
-    Sacrifice { count: u32, filter: TargetFilter },
-    /// CR 118.12: Return N objects matching a filter to their owner's hand
-    /// as an unless cost. Source zone defaults to battlefield; Harvest Wurm
-    /// uses `from_zone: Some(Graveyard)`.
-    ReturnToHand {
-        count: u32,
-        filter: TargetFilter,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        from_zone: Option<crate::types::zones::Zone>,
-    },
-}
-
-/// CR 118.12: "Effect unless [player] pays {cost}"
-/// Wraps any effect with an opponent payment choice.
+/// CR 118.12 + CR 118.12a: "Effect unless [player] pays {cost}"
+/// Wraps any effect with a player payment choice. The cost is the unified
+/// `AbilityCost` taxonomy — historically a separate `UnlessCost` enum existed,
+/// but every variant collapsed cleanly into `AbilityCost` (fold completed
+/// 2026-05-09 audit batch H3/M1: `Fixed`/`DynamicGeneric` → `Mana`/`ManaDynamic`,
+/// `DiscardCard` → `Discard`, etc.).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UnlessPayModifier {
-    pub cost: UnlessCost,
+    /// CR 118.12: The cost the player may choose to pay to prevent the effect.
+    /// Stored as the unified `AbilityCost` taxonomy (no parallel cost hierarchy).
+    /// Forward-compatible deserialization accepts the legacy `UnlessCost` JSON
+    /// shape so saved games / serialized triggers keep loading after the fold.
+    #[serde(deserialize_with = "deserialize_ability_cost_compat")]
+    pub cost: AbilityCost,
     /// Who must pay — resolved via TargetFilter at trigger resolution time.
     /// Typically TargetFilter::TriggeringPlayer for "that player".
     pub payer: TargetFilter,
+}
+
+/// Boxed variant of `deserialize_ability_cost_compat` for use on fields
+/// declared as `Box<AbilityCost>` (e.g.,
+/// `ManaAbilityResume::UnlessPayment.cost` is boxed to keep the enclosing
+/// enum compact). Same backward-compat behavior as the unboxed variant.
+pub fn deserialize_ability_cost_compat_boxed<'de, D>(d: D) -> Result<Box<AbilityCost>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_ability_cost_compat(d).map(Box::new)
+}
+
+/// Forward-compatible deserializer for `UnlessPayModifier::cost` and
+/// `WaitingFor::UnlessPayment::cost`.
+/// First tries the unified `AbilityCost` JSON shape, then falls back to the
+/// legacy `UnlessCost` shape so saved-game JSON / persisted trigger
+/// definitions keep loading after the 2026-05-09 fold.
+///
+/// Legacy → modern mapping (per audit batch H3/M1):
+/// - `Fixed { cost }` → `Mana { cost }`
+/// - `DynamicGeneric { quantity }` → `ManaDynamic { quantity }`
+/// - `PayLife { amount: i32 }` → `PayLife { amount: QuantityExpr::Fixed { value: amount } }`
+/// - `PayEnergy { amount }` → `PayEnergy { amount }` (identity)
+/// - `DiscardCard { filter }` → `Discard { count: 1, filter, random: false, self_ref: false }`
+/// - `Sacrifice { count, filter }` → `Sacrifice { target: filter, count }`
+/// - `ReturnToHand { count, filter, from_zone }` → `ReturnToHand { count, filter: Some(filter), from_zone }`
+pub fn deserialize_ability_cost_compat<'de, D>(d: D) -> Result<AbilityCost, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize as _;
+    let raw: serde_json::Value = serde_json::Value::deserialize(d)?;
+    // Try the modern AbilityCost shape first.
+    if let Ok(cost) = serde_json::from_value::<AbilityCost>(raw.clone()) {
+        return Ok(cost);
+    }
+    // Fall back to the legacy `UnlessCost` shape and translate.
+    let legacy: LegacyUnlessCost = serde_json::from_value(raw).map_err(serde::de::Error::custom)?;
+    Ok(legacy.into_ability_cost())
+}
+
+/// CR 118.12: Legacy shadow type used ONLY by `deserialize_ability_cost_compat`
+/// to accept pre-fold serialized JSON. The variants and field names mirror the
+/// pre-2026-05-09 `UnlessCost` enum exactly. New code must NOT construct this
+/// type — it exists solely as a deserialization staging area.
+#[derive(Deserialize)]
+#[serde(tag = "type")]
+enum LegacyUnlessCost {
+    Fixed {
+        cost: ManaCost,
+    },
+    DynamicGeneric {
+        quantity: QuantityExpr,
+    },
+    PayLife {
+        amount: i32,
+    },
+    PayEnergy {
+        amount: u32,
+    },
+    DiscardCard {
+        #[serde(default)]
+        filter: Option<TargetFilter>,
+    },
+    Sacrifice {
+        count: u32,
+        filter: TargetFilter,
+    },
+    ReturnToHand {
+        count: u32,
+        filter: TargetFilter,
+        #[serde(default)]
+        from_zone: Option<Zone>,
+    },
+}
+
+impl LegacyUnlessCost {
+    fn into_ability_cost(self) -> AbilityCost {
+        match self {
+            LegacyUnlessCost::Fixed { cost } => AbilityCost::Mana { cost },
+            LegacyUnlessCost::DynamicGeneric { quantity } => AbilityCost::ManaDynamic { quantity },
+            LegacyUnlessCost::PayLife { amount } => AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: amount },
+            },
+            LegacyUnlessCost::PayEnergy { amount } => AbilityCost::PayEnergy { amount },
+            LegacyUnlessCost::DiscardCard { filter } => AbilityCost::Discard {
+                count: QuantityExpr::Fixed { value: 1 },
+                filter,
+                random: false,
+                self_ref: false,
+            },
+            LegacyUnlessCost::Sacrifice { count, filter } => AbilityCost::Sacrifice {
+                target: filter,
+                count,
+            },
+            LegacyUnlessCost::ReturnToHand {
+                count,
+                filter,
+                from_zone,
+            } => AbilityCost::ReturnToHand {
+                count,
+                filter: Some(filter),
+                from_zone,
+            },
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3722,10 +3909,6 @@ pub enum Effect {
         /// Used by cards like Tishana's Tidebinder ("loses all abilities for as long as ~").
         #[serde(default)]
         source_static: Option<StaticDefinition>,
-        /// CR 118.12: "Counter target spell unless its controller pays {X}".
-        /// When present, the spell's controller may pay the cost to prevent the counter.
-        #[serde(default)]
-        unless_payment: Option<UnlessCost>,
     },
     /// CR 701.6 + CR 405.1: Mass counter — counter every spell or ability on
     /// the stack matching `target`. Mirrors `Effect::DestroyAll` /
@@ -5086,10 +5269,6 @@ fn default_one_i32() -> i32 {
     1
 }
 
-fn is_zero_usize(value: &usize) -> bool {
-    *value == 0
-}
-
 fn default_player_filter_controller() -> PlayerFilter {
     PlayerFilter::Controller
 }
@@ -5104,6 +5283,35 @@ fn default_quantity_four() -> QuantityExpr {
 
 fn default_counter_transfer_mode() -> CounterTransferMode {
     CounterTransferMode::Move
+}
+
+fn default_damage_aggregate() -> AggregateFunction {
+    AggregateFunction::Sum
+}
+
+/// Backward-compat default for the legacy
+/// `FilterProp::MostPrevalentCreatureTypeInLibrary` shape. Old saves had no
+/// `zone` field; it always meant the player's library.
+fn default_most_prevalent_zone() -> crate::types::zones::Zone {
+    crate::types::zones::Zone::Library
+}
+
+/// Backward-compat default for the legacy
+/// `QuantityRef::ObjectCountDistinctNames` shape. Old saves had no
+/// `qualities` field; the count was always deduplicated by name.
+fn default_distinct_names() -> Vec<SharedQuality> {
+    vec![SharedQuality::Name]
+}
+
+/// Backward-compat default for the legacy
+/// `FilterProp::MostPrevalentCreatureTypeInLibrary` shape. Old saves had no
+/// `scope` field; it always meant `your` library.
+fn default_most_prevalent_scope() -> ControllerRef {
+    ControllerRef::You
+}
+
+fn is_default_damage_aggregate(a: &AggregateFunction) -> bool {
+    matches!(a, AggregateFunction::Sum)
 }
 
 fn is_default_search_selection_constraint(c: &SearchSelectionConstraint) -> bool {
@@ -6512,6 +6720,13 @@ pub struct AbilityDefinition {
     /// Produced by "each opponent discards", "each player draws", etc.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub player_scope: Option<PlayerFilter>,
+    /// CR 115.1 + CR 701.9b: Selection mode for this ability's target slot(s).
+    /// `Chosen` (default) = the controller chooses each target per CR 115.1.
+    /// `Random` = the game uniformly selects from each slot's legal-target set
+    /// (Mana Clash, Goblin Lyre, Pixie Queen, Vexing Sphinx, Maddening Hex, etc.).
+    /// Read at target-selection time to short-circuit `WaitingFor::TargetSelection`.
+    #[serde(default, skip_serializing_if = "TargetSelectionMode::is_chosen")]
+    pub target_selection_mode: TargetSelectionMode,
 }
 
 impl fmt::Debug for AbilityDefinition {
@@ -6565,6 +6780,7 @@ impl AbilityDefinition {
             cost_reduction: None,
             forward_result: false,
             player_scope: None,
+            target_selection_mode: TargetSelectionMode::Chosen,
         }
     }
 
@@ -7851,6 +8067,26 @@ pub enum ReplacementMode {
     },
 }
 
+/// CR 614.12a + CR 615.5: Continuation effect that runs after a replacement
+/// effect's modifications complete. Stashed by the replacement pipeline,
+/// drained by callers (`engine_replacement`, `stack`, `deal_damage`,
+/// `engine`).
+///
+/// Two binding states share one slot:
+/// - `Template`: an `AbilityDefinition` AST that needs the replacement
+///   source for resolution context (e.g. "As ~ enters, choose a basic land
+///   type" — controller and source come from the resolving permanent).
+/// - `Resolved`: a `ResolvedAbility` that already carries selected targets
+///   and resolution-time context, ready for direct dispatch (e.g. Phyrexian
+///   Hydra's prevented-damage follow-up captures the source and counter
+///   quantity from the resolution that created the prevention shield).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "ability")]
+pub enum PostReplacementContinuation {
+    Template(Box<AbilityDefinition>),
+    Resolved(Box<ResolvedAbility>),
+}
+
 /// Replacement effect definition with typed fields. Zero params HashMap.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReplacementDefinition {
@@ -8473,6 +8709,11 @@ pub struct ResolvedAbility {
     pub ability_index: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub may_trigger_origin: Option<MayTriggerOrigin>,
+    /// CR 115.1 + CR 701.9b: Selection mode carried through from the originating
+    /// `AbilityDefinition`. Read by `casting_targets`/`engine_modes`/`planeswalker`
+    /// to short-circuit `WaitingFor::TargetSelection` for `Random` abilities.
+    #[serde(default, skip_serializing_if = "TargetSelectionMode::is_chosen")]
+    pub target_selection_mode: TargetSelectionMode,
 }
 
 impl ResolvedAbility {
@@ -8511,6 +8752,7 @@ impl ResolvedAbility {
             cost_paid_object: None,
             ability_index: None,
             may_trigger_origin: None,
+            target_selection_mode: TargetSelectionMode::Chosen,
         }
     }
 
@@ -9581,6 +9823,7 @@ mod tests {
             let cost = AbilityCost::ReturnToHand {
                 count: 1,
                 filter: None,
+                from_zone: None,
             };
             assert_eq!(cost.categories(), vec![CostCategory::ReturnsToHand]);
         }

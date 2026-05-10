@@ -708,7 +708,7 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AbilityCost, AbilityDefinition, AbilityKind, ControllerRef, Effect, ManaContribution,
-        ManaProduction, QuantityExpr, ResolvedAbility, TargetFilter, TypedFilter, UnlessCost,
+        ManaProduction, QuantityExpr, ResolvedAbility, TargetFilter, TypedFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
@@ -1127,7 +1127,7 @@ mod tests {
             (
                 WaitingFor::UnlessPayment {
                     player: PlayerId(0),
-                    cost: UnlessCost::Fixed {
+                    cost: AbilityCost::Mana {
                         cost: ManaCost::generic(1),
                     },
                     pending_effect: Box::new(empty_effect(ObjectId(0))),

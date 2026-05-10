@@ -10,7 +10,7 @@ use crate::types::ability::{
     ModalSelectionCondition, ModalSelectionConstraint, NinjutsuVariant, PtValue, QuantityExpr,
     ReplacementCondition, ReplacementDefinition, RuntimeHandler, SearchSelectionConstraint,
     StaticDefinition, TargetFilter, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
-    UnlessCost, UnlessPayModifier,
+    UnlessPayModifier,
 };
 use crate::types::card::{CardFace, CardLayout};
 use crate::types::card_type::{CardType, CoreType, Supertype};
@@ -948,6 +948,23 @@ fn typecycling_subtype_to_filter(subtype: &str) -> TargetFilter {
     }
 }
 
+/// CR 702.153a: The canonical `AbilityDefinition` produced by a Casualty
+/// trigger — a self-referential `CopySpell` gated on the additional cost
+/// having been paid. This is the single authority for what a casualty trigger
+/// resolves into; both `synthesize_casualty` (intrinsic, embedded as the
+/// trigger's `execute`) and the dynamically-granted casualty path in
+/// `triggers::process_triggers` (instantiated via `build_resolved_from_def`)
+/// share this shape.
+pub fn casualty_copy_ability_definition() -> AbilityDefinition {
+    AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::CopySpell {
+            target: TargetFilter::SelfRef,
+        },
+    )
+    .condition(AbilityCondition::additional_cost_paid_any())
+}
+
 /// CR 702.153a: Synthesize Casualty N into an optional sacrifice cost + self-cast copy trigger.
 ///
 /// Casualty N = two abilities:
@@ -996,19 +1013,11 @@ pub fn synthesize_casualty(face: &mut CardFace) {
         return;
     }
 
-    let copy_effect = AbilityDefinition::new(
-        AbilityKind::Spell,
-        Effect::CopySpell {
-            target: TargetFilter::SelfRef,
-        },
-    )
-    .condition(AbilityCondition::additional_cost_paid_any());
-
     face.triggers.push(
         TriggerDefinition::new(TriggerMode::SpellCast)
             .valid_card(TargetFilter::SelfRef)
             .trigger_zones(vec![Zone::Stack])
-            .execute(copy_effect)
+            .execute(casualty_copy_ability_definition())
             .description("Casualty — copy this spell when cast with casualty paid".to_string()),
     );
 }
@@ -1229,7 +1238,7 @@ pub fn synthesize_echo(face: &mut CardFace) {
                     .to_string(),
             );
         trigger.unless_pay = Some(UnlessPayModifier {
-            cost: UnlessCost::Fixed { cost },
+            cost: AbilityCost::Mana { cost },
             payer: TargetFilter::Controller,
         });
         face.triggers.push(trigger);
@@ -2634,7 +2643,7 @@ mod echo_synthesis_tests {
         assert!(matches!(
             trigger.unless_pay.as_ref(),
             Some(UnlessPayModifier {
-                cost: UnlessCost::Fixed {
+                cost: AbilityCost::Mana {
                     cost: ManaCost::Cost { generic: 3, .. },
                 },
                 payer: TargetFilter::Controller,
@@ -3934,6 +3943,39 @@ mod idempotency_tests {
             face.triggers.len(),
             first_count,
             "casualty trigger should only register once"
+        );
+    }
+
+    /// CR 702.153a: The intrinsic synthesized casualty trigger embeds the
+    /// canonical `casualty_copy_ability_definition()` as its `execute`. This
+    /// regression test guards the L9 fix: both `synthesize_casualty` and the
+    /// dynamically-granted casualty path in `triggers::process_triggers` must
+    /// derive the trigger's resolved ability shape from this single source of
+    /// truth (effect = `CopySpell { SelfRef }`, condition =
+    /// `additional_cost_paid_any`).
+    #[test]
+    fn intrinsic_casualty_trigger_uses_shared_canonical_definition() {
+        let mut face = CardFace::default();
+        face.card_type.core_types.push(CoreType::Sorcery);
+        face.keywords.push(Keyword::Casualty(1));
+        synthesize_casualty(&mut face);
+
+        let canonical = casualty_copy_ability_definition();
+        let trig = face
+            .triggers
+            .iter()
+            .find(|t| matches!(t.mode, TriggerMode::SpellCast))
+            .expect("synthesize_casualty should produce a SpellCast trigger");
+        let execute = trig
+            .execute
+            .as_ref()
+            .expect("casualty trigger must have an execute ability");
+
+        assert_eq!(
+            **execute, canonical,
+            "intrinsic casualty trigger's execute must equal the canonical \
+             casualty_copy_ability_definition() — single source of truth for \
+             both intrinsic and dynamically-granted casualty"
         );
     }
 }

@@ -610,7 +610,6 @@ fn setup_pitch_scenario() -> (
         .with_ability(Effect::Counter {
             target: TargetFilter::Any,
             source_static: None,
-            unless_payment: None,
         })
         .with_additional_cost(AdditionalCost::Required(AbilityCost::Exile {
             count: 1,

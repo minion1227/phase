@@ -1,8 +1,7 @@
 use crate::game::replacement::{self, ReplacementResult};
 use crate::game::zones;
 use crate::types::ability::{
-    Duration, Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
-    TypedFilter,
+    Duration, Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TypedFilter,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{ExileLink, ExileLinkKind, GameState, WaitingFor};
@@ -331,46 +330,13 @@ pub fn resolve(
     let filter_controller =
         crate::game::effects::controller_for_relative_filter(ability, target_filter);
 
-    // CR 608.2c + 603.10a: Self-referential top-level triggers process the
-    // source object through the zone-change pipeline. Covers:
-    //   - `SelfRef` (the parser's `~` anaphor: "shuffle ~ into its owner's library")
-    //   - `ParentTarget` (the "it" anaphor on a top-level trigger with no
-    //     parent chain: Academy Rector, Bronzehide Lion, Loyal Cathar, etc.)
-    //   - `None` (no explicit target on an effect that still needs a subject)
-    // In all three cases, an empty `ability.targets` means "the source object".
-    // `TriggeringSource` is deliberately excluded: it resolves via
-    // `state.current_trigger_event`, not `source_id`.
-    let use_self = matches!(
-        target_filter,
-        TargetFilter::None | TargetFilter::SelfRef | TargetFilter::ParentTarget
-    ) && ability.targets.is_empty();
-    let self_ref_targets = if use_self {
-        vec![TargetRef::Object(ability.source_id)]
-    } else {
-        vec![]
-    };
-
-    let event_context_targets = if self_ref_targets.is_empty() {
-        crate::game::targeting::resolve_event_context_target(
-            state,
-            target_filter,
-            ability.source_id,
-        )
-        .into_iter()
-        .collect()
-    } else {
-        vec![]
-    };
-
-    let effective_targets = if !self_ref_targets.is_empty() {
-        &self_ref_targets
-    } else if !event_context_targets.is_empty() {
-        &event_context_targets
-    } else {
-        &ability.targets
-    };
+    // CR 608.2c + 603.10a: Resolve the subject across self-ref → event-context →
+    // chosen-targets, the unified 3-tier dispatch shared by zone-change-style
+    // effects whose subject can be the source itself, an event-context
+    // referent, or a pre-selected target. See `targeting::resolved_targets`.
+    let effective_targets = crate::game::targeting::resolved_targets(ability, target_filter, state);
     let targeted_objects =
-        crate::game::effects::effect_object_targets(target_filter, effective_targets);
+        crate::game::effects::effect_object_targets(target_filter, &effective_targets);
 
     if targeted_objects.is_empty() {
         // CR 115.6: "Up to one target" — if the player chose zero targets during
@@ -800,7 +766,7 @@ pub fn resolve_all(
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::{ControllerRef, FilterProp, TargetFilter};
+    use crate::types::ability::{ControllerRef, FilterProp, TargetFilter, TargetRef};
     use crate::types::card_type::CoreType;
     use crate::types::game_state::ZoneChangeRecord;
     use crate::types::identifiers::{CardId, ObjectId};

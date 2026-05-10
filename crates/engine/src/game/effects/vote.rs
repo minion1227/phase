@@ -231,6 +231,7 @@ pub fn resolve_tally(
             cost_paid_object: None,
             ability_index: None,
             may_trigger_origin: None,
+            target_selection_mode: per_choice_effect[idx].target_selection_mode,
         };
         // CR 608.2c: depth = 1 so the chain entry doesn't clear
         // `state.last_vote_ballots`; see ledger-publication note above.
@@ -282,6 +283,7 @@ fn resolved_from_def(
         cost_paid_object: None,
         ability_index: None,
         may_trigger_origin: None,
+        target_selection_mode: def.target_selection_mode,
     }
 }
 
@@ -415,6 +417,7 @@ mod tests {
             cost_paid_object: None,
             ability_index: None,
             may_trigger_origin: None,
+            target_selection_mode: crate::types::ability::TargetSelectionMode::Chosen,
         };
 
         let mut events = Vec::new();
@@ -496,6 +499,7 @@ mod tests {
             cost_paid_object: None,
             ability_index: None,
             may_trigger_origin: None,
+            target_selection_mode: crate::types::ability::TargetSelectionMode::Chosen,
         }
     }
 

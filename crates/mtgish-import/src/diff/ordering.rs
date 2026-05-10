@@ -193,6 +193,13 @@ pub const ORDERING_MANIFEST: &[((&str, &str), OrderingClass)] = &[
     // ----- QuantityRef devotion colors -----
     (("QuantityRef", "colors"), OrderingClass::SetEquivalent),
     (("QuantityRef", "card_types"), OrderingClass::SetEquivalent),
+    // ----- QuantityRef ObjectCountDistinct dedup-key set -----
+    // CR 201.2: `qualities` is the set of shared characteristics used to
+    // deduplicate counted objects (e.g. `[Name]` for "different names",
+    // `[ManaValue]` for "different mana values"). The order of qualities
+    // doesn't change which objects coincide — it's a multiset key — so
+    // diffs can ignore ordering safely.
+    (("QuantityRef", "qualities"), OrderingClass::SetEquivalent),
     // ----- StaticCondition.colors / nested condition list -----
     (("StaticCondition", "colors"), OrderingClass::SetEquivalent),
     (

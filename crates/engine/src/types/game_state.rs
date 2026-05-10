@@ -10,7 +10,7 @@ use super::ability::{
     ChooseFromZoneConstraint, ContinuousModification, CostPaidObjectSnapshot,
     DelayedTriggerCondition, Duration, EffectKind, GameRestriction, KeywordAction, KickerVariant,
     ModalChoice, ResolvedAbility, SearchSelectionConstraint, StaticCondition, TargetFilter,
-    TargetRef, TriggerCondition, UnlessCost,
+    TargetRef, TriggerCondition,
 };
 use super::card::CardFace;
 use super::card_type::{CoreType, Supertype};
@@ -43,7 +43,7 @@ fn is_zero_u32(value: &u32) -> bool {
     *value == 0
 }
 
-fn is_zero_usize(value: &usize) -> bool {
+pub(crate) fn is_zero_usize(value: &usize) -> bool {
     *value == 0
 }
 
@@ -188,9 +188,35 @@ pub struct SpellCastRecord {
     pub has_x_in_cost: bool,
     /// CR 400.1 + CR 601.2a: Zone the spell was cast from, captured at cast-time
     /// so per-turn spell-history conditions can answer "from your hand" after
-    /// the spell has moved on from the stack.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub from_zone: Option<Zone>,
+    /// the spell has moved on from the stack. Per CR 601.2a every cast spell
+    /// is moved "from where it is" to the stack, so this field is always
+    /// populated. Older serialized snapshots emitted this as `Option<Zone>`
+    /// (with `null` for the default); the custom deserializer accepts both
+    /// shapes and falls back to `Zone::Hand` (the dominant origin per
+    /// CR 601.2a) when the field is missing or `null`.
+    #[serde(
+        default = "default_spell_cast_record_from_zone",
+        deserialize_with = "deserialize_spell_cast_record_from_zone"
+    )]
+    pub from_zone: Zone,
+}
+
+/// CR 601.2a: Default origin zone for `SpellCastRecord.from_zone`. Hand is the
+/// overwhelmingly common cast origin, so it's the safe default for snapshots
+/// that pre-date the non-Option migration.
+fn default_spell_cast_record_from_zone() -> Zone {
+    Zone::Hand
+}
+
+/// Backwards-compatible deserializer for `SpellCastRecord.from_zone`. Accepts
+/// the modern non-Option encoding (`"Hand"`, `"Battlefield"`, …), the legacy
+/// `Option<Zone>` encoding (`null` → `Zone::Hand`), and absent fields (handled
+/// by `#[serde(default = …)]` upstream of this hook).
+fn deserialize_spell_cast_record_from_zone<'de, D>(de: D) -> Result<Zone, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<Zone>::deserialize(de)?.unwrap_or_else(default_spell_cast_record_from_zone))
 }
 
 /// CR 601.2f: A pending one-shot cost reduction for the next spell a player casts.
@@ -726,7 +752,13 @@ pub enum ManaAbilityResume {
         convoke_mode: Option<ConvokeMode>,
     },
     UnlessPayment {
-        cost: UnlessCost,
+        /// CR 118.12: Carried-through cost from `WaitingFor::UnlessPayment`.
+        /// See the matching `WaitingFor::UnlessPayment.cost` doc-comment for
+        /// the legacy-shape deserialization contract. Boxed so the
+        /// enclosing `ManaAbilityResume` enum stays compact (other variants
+        /// are zero-sized or carry only an `Option`).
+        #[serde(deserialize_with = "crate::types::ability::deserialize_ability_cost_compat_boxed")]
+        cost: Box<AbilityCost>,
         pending_effect: Box<ResolvedAbility>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         trigger_event: Option<GameEvent>,
@@ -1529,7 +1561,12 @@ pub enum WaitingFor {
     /// and ward costs (CR 702.21a).
     UnlessPayment {
         player: PlayerId,
-        cost: UnlessCost,
+        /// CR 118.12: The cost to pay. Stored as the unified `AbilityCost`
+        /// taxonomy. Forward-compatible deserialization accepts the legacy
+        /// `UnlessCost` JSON shape (see `deserialize_ability_cost_compat` in
+        /// `types/ability.rs`).
+        #[serde(deserialize_with = "crate::types::ability::deserialize_ability_cost_compat")]
+        cost: AbilityCost,
         /// The effect to execute if the player declines to pay.
         pending_effect: Box<ResolvedAbility>,
         /// Trigger event context to restore if declining the payment resumes a
@@ -2581,20 +2618,38 @@ pub struct GameState {
 
     // Replacement effects
     pub pending_replacement: Option<PendingReplacement>,
-    /// Transient: effect to resolve after a replacement choice's zone change completes.
-    /// Set by `continue_replacement` for Optional replacements, consumed by the caller.
+    /// CR 614.12a + CR 615.5: Continuation effect to resolve after a
+    /// replacement's modifications complete. The two binding states (Template
+    /// AST vs. Resolved with captured targets) share one slot via
+    /// `PostReplacementContinuation`. Set by `continue_replacement` for
+    /// Optional replacements and by `apply_single_replacement` for Mandatory
+    /// post-effects; drained by `apply_pending_post_replacement_effect`.
+    ///
+    /// Pre-2026-05-09 audit M4 fold: legacy `post_replacement_effect` and
+    /// `post_replacement_resolved_effect` fields were merged here. Old saved
+    /// JSON migrates via `migrate_post_replacement_continuation`, called from
+    /// `finalize_public_state`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub post_replacement_effect: Option<Box<crate::types::ability::AbilityDefinition>>,
-    /// Transient resolved continuation for runtime-created replacement shields.
-    /// This preserves selected targets for CR 615.5 prevention follow-ups.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub post_replacement_resolved_effect: Option<Box<crate::types::ability::ResolvedAbility>>,
+    pub post_replacement_continuation: Option<crate::types::ability::PostReplacementContinuation>,
+    /// Pre-2026-05-09 audit M4 compat: legacy template slot. Read from old
+    /// JSON only; migrated into `post_replacement_continuation` by
+    /// `migrate_post_replacement_continuation`. Never written to.
+    #[serde(default, skip_serializing, rename = "post_replacement_effect")]
+    pub(crate) legacy_post_replacement_effect:
+        Option<Box<crate::types::ability::AbilityDefinition>>,
+    /// Pre-2026-05-09 audit M4 compat: legacy resolved slot. Read from old
+    /// JSON only; migrated into `post_replacement_continuation` by
+    /// `migrate_post_replacement_continuation`. Never written to.
+    #[serde(default, skip_serializing, rename = "post_replacement_resolved_effect")]
+    pub(crate) legacy_post_replacement_resolved_effect:
+        Option<Box<crate::types::ability::ResolvedAbility>>,
 
     /// CR 615.5: Source object of the replacement that stashed
-    /// `post_replacement_effect`. Used by prevention follow-ups (e.g. Phyrexian
-    /// Hydra) so the post-effect's `SelfRef`-targeted PutCounter resolves
-    /// against the shield's own object rather than the damaged target. Set
-    /// alongside `post_replacement_effect` and consumed at the same time.
+    /// `post_replacement_continuation`. Used by prevention follow-ups (e.g.
+    /// Phyrexian Hydra) so the post-effect's `SelfRef`-targeted PutCounter
+    /// resolves against the shield's own object rather than the damaged target.
+    /// Set alongside `post_replacement_continuation` and consumed at the same
+    /// time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub post_replacement_source: Option<crate::types::identifiers::ObjectId>,
 
@@ -3339,8 +3394,9 @@ impl GameState {
             max_lands_per_turn: 1,
             priority_pass_count: 0,
             pending_replacement: None,
-            post_replacement_effect: None,
-            post_replacement_resolved_effect: None,
+            post_replacement_continuation: None,
+            legacy_post_replacement_effect: None,
+            legacy_post_replacement_resolved_effect: None,
             post_replacement_source: None,
             post_replacement_event_source: None,
             post_replacement_event_target: None,
@@ -3530,6 +3586,32 @@ impl GameState {
         self.layers_dirty = true;
         id
     }
+
+    /// CR 614.12a + CR 615.5: Migrate the pre-2026-05-09 audit M4 split-slot
+    /// shape (`post_replacement_effect` + `post_replacement_resolved_effect`)
+    /// into the unified `post_replacement_continuation` slot. Idempotent —
+    /// no-op when both legacy slots are empty (the steady-state case once a
+    /// post-load hop has run). Called from `finalize_public_state` so every
+    /// deserialize boundary (engine-wasm restore, multiplayer host resume,
+    /// gamePersistence rehydration) gets the migration without per-callsite
+    /// plumbing. The Resolved arm wins when both legacy slots are
+    /// (impossibly) populated, mirroring the pre-fold dispatcher precedence
+    /// at `engine_replacement.rs::apply_pending_post_replacement_effect`.
+    pub fn migrate_post_replacement_continuation(&mut self) {
+        if self.post_replacement_continuation.is_some() {
+            self.legacy_post_replacement_effect = None;
+            self.legacy_post_replacement_resolved_effect = None;
+            return;
+        }
+        if let Some(resolved) = self.legacy_post_replacement_resolved_effect.take() {
+            self.post_replacement_continuation =
+                Some(crate::types::ability::PostReplacementContinuation::Resolved(resolved));
+            self.legacy_post_replacement_effect = None;
+        } else if let Some(template) = self.legacy_post_replacement_effect.take() {
+            self.post_replacement_continuation =
+                Some(crate::types::ability::PostReplacementContinuation::Template(template));
+        }
+    }
 }
 
 impl Default for GameState {
@@ -3665,7 +3747,10 @@ impl Eq for GameState {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::{AbilityKind, Effect, QuantityExpr};
+    use crate::types::ability::{
+        AbilityDefinition, AbilityKind, Effect, PostReplacementContinuation, QuantityExpr,
+        ResolvedAbility, TargetFilter,
+    };
 
     #[test]
     fn default_creates_two_player_game() {
@@ -4417,5 +4502,143 @@ mod tests {
         let mut deserialized: GameState = serde_json::from_str(&serialized).unwrap();
         deserialized.rng = ChaCha20Rng::seed_from_u64(deserialized.rng_seed);
         assert_eq!(state, deserialized);
+    }
+
+    /// 2026-05-09 audit M4 backward-compat: a JSON snapshot saved before the
+    /// post-replacement-continuation slot fold (with the legacy
+    /// `post_replacement_effect` field) deserializes cleanly and the legacy
+    /// content lifts into the new unified slot once
+    /// `migrate_post_replacement_continuation` runs (called from
+    /// `finalize_public_state` at every deserialize boundary).
+    #[test]
+    fn legacy_post_replacement_effect_field_lifts_into_unified_slot() {
+        // Build a baseline state, serialize it, then splice in the legacy
+        // field name so the snapshot mirrors a pre-fold producer.
+        let baseline = GameState::new_two_player(42);
+        let mut snapshot: serde_json::Value = serde_json::to_value(&baseline).unwrap();
+        let template = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::LoseLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                target: None,
+            },
+        );
+        let template_json = serde_json::to_value(&template).unwrap();
+        snapshot
+            .as_object_mut()
+            .unwrap()
+            .insert("post_replacement_effect".to_string(), template_json);
+
+        let serialized = serde_json::to_string(&snapshot).unwrap();
+        let mut state: GameState = serde_json::from_str(&serialized).unwrap();
+        // Pre-migration: legacy slot populated, unified slot empty.
+        assert!(state.post_replacement_continuation.is_none());
+        assert!(state.legacy_post_replacement_effect.is_some());
+
+        state.migrate_post_replacement_continuation();
+
+        match state.post_replacement_continuation {
+            Some(PostReplacementContinuation::Template(ref def)) => {
+                assert_eq!(**def, template);
+            }
+            other => panic!("expected Template after migration, got {other:?}"),
+        }
+        assert!(state.legacy_post_replacement_effect.is_none());
+    }
+
+    /// 2026-05-09 audit M4 backward-compat (Resolved variant): a pre-fold
+    /// snapshot with `post_replacement_resolved_effect` lifts to
+    /// `PostReplacementContinuation::Resolved` after migration.
+    #[test]
+    fn legacy_post_replacement_resolved_effect_field_lifts_into_unified_slot() {
+        let baseline = GameState::new_two_player(42);
+        let mut snapshot: serde_json::Value = serde_json::to_value(&baseline).unwrap();
+        let resolved = ResolvedAbility::new(
+            Effect::LoseLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                target: Some(TargetFilter::Controller),
+            },
+            Vec::new(),
+            ObjectId(1),
+            PlayerId(0),
+        );
+        let resolved_json = serde_json::to_value(&resolved).unwrap();
+        snapshot.as_object_mut().unwrap().insert(
+            "post_replacement_resolved_effect".to_string(),
+            resolved_json,
+        );
+
+        let serialized = serde_json::to_string(&snapshot).unwrap();
+        let mut state: GameState = serde_json::from_str(&serialized).unwrap();
+        assert!(state.post_replacement_continuation.is_none());
+        assert!(state.legacy_post_replacement_resolved_effect.is_some());
+
+        state.migrate_post_replacement_continuation();
+
+        match state.post_replacement_continuation {
+            Some(PostReplacementContinuation::Resolved(ref boxed)) => {
+                assert_eq!(**boxed, resolved);
+            }
+            other => panic!("expected Resolved after migration, got {other:?}"),
+        }
+        assert!(state.legacy_post_replacement_resolved_effect.is_none());
+    }
+
+    /// CR 601.2a: A `SpellCastRecord` snapshot from an older serialized state
+    /// (when `from_zone` was `Option<Zone>` and the default was `null`) must
+    /// deserialize into a record whose `from_zone` is `Zone::Hand` — the
+    /// dominant cast-from origin per CR 601.2a.
+    #[test]
+    fn spell_cast_record_legacy_null_from_zone_deserializes_to_hand() {
+        let legacy_json = r#"{
+            "core_types": ["Creature"],
+            "supertypes": [],
+            "subtypes": ["Bird"],
+            "keywords": ["Flying"],
+            "colors": ["Blue"],
+            "mana_value": 3,
+            "from_zone": null
+        }"#;
+        let record: SpellCastRecord = serde_json::from_str(legacy_json).unwrap();
+        assert_eq!(record.from_zone, Zone::Hand);
+    }
+
+    /// CR 601.2a: A `SpellCastRecord` snapshot that omits `from_zone` entirely
+    /// (e.g., a pre-migration snapshot serialized while the field still had
+    /// `skip_serializing_if = "Option::is_none"`) must deserialize into
+    /// `Zone::Hand` via the `serde(default = …)` hook.
+    #[test]
+    fn spell_cast_record_missing_from_zone_deserializes_to_hand() {
+        let no_field_json = r#"{
+            "core_types": ["Instant"],
+            "supertypes": [],
+            "subtypes": [],
+            "keywords": [],
+            "colors": [],
+            "mana_value": 1
+        }"#;
+        let record: SpellCastRecord = serde_json::from_str(no_field_json).unwrap();
+        assert_eq!(record.from_zone, Zone::Hand);
+    }
+
+    /// CR 601.2a: A snapshot with a real `from_zone` value (the modern non-Option
+    /// encoding) must deserialize unchanged — the legacy adapter must not
+    /// rewrite valid origin zones.
+    #[test]
+    fn spell_cast_record_explicit_from_zone_round_trips() {
+        let original = SpellCastRecord {
+            core_types: vec![CoreType::Sorcery],
+            supertypes: vec![],
+            subtypes: vec![],
+            keywords: vec![],
+            colors: vec![],
+            mana_value: 4,
+            has_x_in_cost: false,
+            from_zone: Zone::Graveyard,
+        };
+        let json = serde_json::to_string(&original).unwrap();
+        let round_tripped: SpellCastRecord = serde_json::from_str(&json).unwrap();
+        assert_eq!(round_tripped, original);
+        assert_eq!(round_tripped.from_zone, Zone::Graveyard);
     }
 }

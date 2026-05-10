@@ -27,7 +27,7 @@ use super::stack;
 use super::ability_utils::{
     assign_targets_in_chain, auto_select_targets_for_ability, begin_target_selection_for_ability,
     build_target_slots, flatten_targets_in_chain, modal_choice_for_player,
-    target_constraints_from_modal,
+    random_select_targets_for_ability, target_constraints_from_modal,
 };
 use super::life_costs::PayLifeCostResult;
 
@@ -313,6 +313,19 @@ fn begin_deferred_target_selection(
     pending.deferred_target_selection = false;
     let target_slots = build_target_slots(state, &pending.ability)?;
     if target_slots.is_empty() {
+        return finish_pending_cost_or_cast(state, player, pending, events);
+    }
+    // CR 115.1 + CR 701.9b: Random-target abilities short-circuit to RNG-driven
+    // selection here too. The deferred-selection path is reached after additional
+    // costs are paid; the random pick still uses `state.rng`.
+    if matches!(
+        pending.ability.target_selection_mode,
+        crate::types::ability::TargetSelectionMode::Random
+    ) {
+        let targets = random_select_targets_for_ability(state, &target_slots, &[])?;
+        let mut ability = pending.ability.clone();
+        assign_targets_in_chain(state, &mut ability, &targets)?;
+        pending.ability = ability;
         return finish_pending_cost_or_cast(state, player, pending, events);
     }
     if let Some(targets) =
@@ -656,6 +669,22 @@ pub(super) fn push_activated_ability_to_stack(
     // before target selection in handle_activate_ability.
     let target_slots = build_target_slots(state, &resolved)?;
     if !target_slots.is_empty() {
+        // CR 115.1 + CR 701.9b: Random-target activated abilities — game picks
+        // uniformly via `state.rng`, no controller prompt.
+        if matches!(
+            resolved.target_selection_mode,
+            crate::types::ability::TargetSelectionMode::Random
+        ) {
+            let targets = random_select_targets_for_ability(state, &target_slots, &[])?;
+            let mut resolved = resolved;
+            assign_targets_in_chain(state, &mut resolved, &targets)?;
+
+            let assigned_targets = flatten_targets_in_chain(&resolved);
+            emit_targeting_events(state, &assigned_targets, source_id, player, events);
+
+            return push_ability_entry(state, player, source_id, ability_index, resolved, events);
+        }
+
         if let Some(targets) =
             auto_select_targets_for_ability(state, &resolved, &target_slots, &[])?
         {
@@ -1503,7 +1532,11 @@ fn pay_additional_cost(
                 });
             }
         }
-        AbilityCost::ReturnToHand { count, ref filter } => {
+        AbilityCost::ReturnToHand {
+            count,
+            ref filter,
+            from_zone: _,
+        } => {
             let eligible = super::casting::find_eligible_return_to_hand_targets(
                 state,
                 player,
@@ -2111,7 +2144,7 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
         .get(&object_id)
         .expect("spell object still exists after stack push")
         .clone();
-    restrictions::record_spell_cast_from_zone(state, player, &obj, Some(source_zone));
+    restrictions::record_spell_cast_from_zone(state, player, &obj, source_zone);
 
     // CR 601.2f: Consume any one-shot pending cost reductions now that the spell is finalized.
     super::casting::consume_pending_spell_cost_reduction(state, player);
@@ -5369,7 +5402,6 @@ mod tests {
                 Effect::Counter {
                     target: TargetFilter::Any,
                     source_static: None,
-                    unless_payment: None,
                 },
                 Vec::new(),
                 source_id,
@@ -5485,7 +5517,6 @@ mod tests {
                 Effect::Counter {
                     target: TargetFilter::Any,
                     source_static: None,
-                    unless_payment: None,
                 },
                 Vec::new(),
                 source_id,
@@ -5570,7 +5601,6 @@ mod tests {
                 Effect::Counter {
                     target: crate::types::ability::TargetFilter::Any,
                     source_static: None,
-                    unless_payment: None,
                 },
                 Vec::new(),
                 source_id,
@@ -5644,7 +5674,6 @@ mod tests {
                 Effect::Counter {
                     target: crate::types::ability::TargetFilter::Any,
                     source_static: None,
-                    unless_payment: None,
                 },
                 Vec::new(),
                 source_id,
@@ -5751,7 +5780,6 @@ mod tests {
                 Effect::Counter {
                     target: TargetFilter::Any,
                     source_static: None,
-                    unless_payment: None,
                 },
                 Vec::new(),
                 source_id,

@@ -26,10 +26,10 @@ use super::oracle_util::{
 };
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::types::ability::{
-    AbilityDefinition, AbilityKind, AttachmentKind, CastVariantPaid, Comparator, ControllerRef,
-    CounterTriggerFilter, DamageKindFilter, Effect, FilterProp, PlayerFilter, QuantityExpr,
-    QuantityRef, StaticCondition, TargetFilter, TriggerCondition, TriggerConstraint,
-    TriggerDefinition, TypeFilter, TypedFilter, UnlessCost, UnlessPayModifier,
+    AbilityCost, AbilityDefinition, AbilityKind, AttachmentKind, CastVariantPaid, Comparator,
+    ControllerRef, CounterTriggerFilter, DamageKindFilter, Effect, FilterProp, PlayerFilter,
+    QuantityExpr, QuantityRef, StaticCondition, TargetFilter, TriggerCondition, TriggerConstraint,
+    TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier,
 };
 use crate::types::card_type::CoreType;
 use crate::types::events::PlayerActionKind;
@@ -906,12 +906,12 @@ fn extract_unless_pay_modifier(
         if !rest.trim().is_empty() {
             return (text.to_string(), None);
         }
-        UnlessCost::PayEnergy { amount }
+        AbilityCost::PayEnergy { amount }
     } else if cost_text == "{x}" || cost_text == "{X}" {
         // Check for "where X is" clause
         let remainder = &cost_str[cost_end..];
         if let Some(quantity) = parse_where_x_is_trigger(remainder) {
-            UnlessCost::DynamicGeneric { quantity }
+            AbilityCost::ManaDynamic { quantity }
         } else {
             return (text.to_string(), None);
         }
@@ -927,7 +927,7 @@ fn extract_unless_pay_modifier(
         {
             cost
         } else {
-            UnlessCost::Fixed { cost: mana_cost }
+            AbilityCost::Mana { cost: mana_cost }
         }
     };
 
@@ -997,7 +997,7 @@ fn parse_inferred_pronoun_unless_alt_cost(
     after_unless: &str,
     effect_before_unless: &str,
     condition_lower: &str,
-) -> Option<(UnlessCost, TargetFilter)> {
+) -> Option<(AbilityCost, TargetFilter)> {
     let cost = if let Ok((rest, _)) =
         tag::<_, _, OracleError<'_>>("they discard ").parse(after_unless)
     {
@@ -1011,20 +1011,22 @@ fn parse_inferred_pronoun_unless_alt_cost(
     Some((cost, payer))
 }
 
-fn parse_unless_life_cost(rest: &str) -> Option<UnlessCost> {
+fn parse_unless_life_cost(rest: &str) -> Option<AbilityCost> {
     let (amount, after_num) = parse_number(rest)?;
     if tag::<_, _, OracleError<'_>>("life")
         .parse(after_num.trim_start())
         .is_ok()
     {
-        return Some(UnlessCost::PayLife {
-            amount: amount as i32,
+        return Some(AbilityCost::PayLife {
+            amount: QuantityExpr::Fixed {
+                value: amount as i32,
+            },
         });
     }
     None
 }
 
-fn parse_unless_discard_cost(discard_tail: &str) -> Option<UnlessCost> {
+fn parse_unless_discard_cost(discard_tail: &str) -> Option<AbilityCost> {
     let trailing = discard_tail.trim().trim_end_matches('.').trim();
     let trailing = alt((
         tag::<_, _, OracleError<'_>>("a "),
@@ -1041,13 +1043,21 @@ fn parse_unless_discard_cost(discard_tail: &str) -> Option<UnlessCost> {
                     .parse(rest)
                     .is_ok()
             {
-                return Some(UnlessCost::DiscardCard { filter: None });
+                return Some(AbilityCost::Discard {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    filter: None,
+                    random: false,
+                    self_ref: false,
+                });
             }
         }
         if let Some(filter) = super::oracle_effect::imperative::parse_discard_card_filter(trailing)
         {
-            return Some(UnlessCost::DiscardCard {
+            return Some(AbilityCost::Discard {
+                count: QuantityExpr::Fixed { value: 1 },
                 filter: Some(filter),
+                random: false,
+                self_ref: false,
             });
         }
     }
@@ -1068,10 +1078,10 @@ fn parse_unless_discard_cost(discard_tail: &str) -> Option<UnlessCost> {
 ///
 /// FIDELITY NOTE: `UnlessCost::DiscardCard` does not currently model "at random"
 /// — the engine resolves via `WaitingFor::WardDiscardChoice` (player-chosen).
-/// This is a known sub-fidelity gap (Balduvian Horde class). Parameterizing
-/// `UnlessCost::DiscardCard` with a `random` axis is deferred pending the
-/// `UnlessCost`/`AbilityCost` unification refactor.
-fn parse_unless_alt_cost(after_unless: &str) -> Option<UnlessCost> {
+/// This is a known sub-fidelity gap (Balduvian Horde class). Post the
+/// 2026-05-09 fold, the `random: bool` field on `AbilityCost::Discard` is
+/// the natural home for this; wiring it into the runtime is future work.
+fn parse_unless_alt_cost(after_unless: &str) -> Option<AbilityCost> {
     // "you discard a card" — match prefix, accept any trailing modifiers
     // ("at random", trailing punctuation) since the caller strips the entire
     // unless-clause wholesale.
@@ -1102,12 +1112,12 @@ fn parse_unless_alt_cost(after_unless: &str) -> Option<UnlessCost> {
     None
 }
 
-/// Parse the tail of "you sacrifice ..." into an `UnlessCost::Sacrifice`.
+/// Parse the tail of "you sacrifice ..." into an `AbilityCost::Sacrifice`.
 /// Expects lowercased text. Accepts:
 /// - `a creature` / `an artifact` / `a [type] you control`
 /// - `two creatures` / `three lands`
 /// - terminal sentence punctuation
-fn parse_unless_sacrifice_filter(rest: &str) -> Option<UnlessCost> {
+fn parse_unless_sacrifice_filter(rest: &str) -> Option<AbilityCost> {
     // Trim trailing sentence punctuation so it doesn't leak into parse_target.
     let trimmed = rest.trim().trim_end_matches('.').trim();
     if trimmed.is_empty() {
@@ -1153,18 +1163,21 @@ fn parse_unless_sacrifice_filter(rest: &str) -> Option<UnlessCost> {
         return None;
     }
 
-    Some(UnlessCost::Sacrifice { count, filter })
+    Some(AbilityCost::Sacrifice {
+        target: filter,
+        count,
+    })
 }
 
 /// CR 118.12: Parse "you return [count] [filter] [you control] to its/their
-/// owner's hand" into `UnlessCost::ReturnToHand`. Expects lowercased text after
+/// owner's hand" into `AbilityCost::ReturnToHand`. Expects lowercased text after
 /// "you return ". Handles patterns like:
 /// - "an artifact you control to its owner's hand"
 /// - "two forests you control to their owner's hand"
 /// - "another creature you control to its owner's hand"
 /// - "an untapped island you control to its owner's hand"
 /// - "a non-lair land you control to its owner's hand"
-fn parse_unless_return_to_hand(rest: &str) -> Option<UnlessCost> {
+fn parse_unless_return_to_hand(rest: &str) -> Option<AbilityCost> {
     let to_pos = rest.find(" to ")?; // allow-noncombinator: delimiter split on pre-tokenized unless clause text
     let filter_part = rest[..to_pos].trim().trim_end_matches('.').trim();
     if filter_part.is_empty() {
@@ -1209,9 +1222,9 @@ fn parse_unless_return_to_hand(rest: &str) -> Option<UnlessCost> {
         },
     };
 
-    Some(UnlessCost::ReturnToHand {
+    Some(AbilityCost::ReturnToHand {
         count,
-        filter,
+        filter: Some(filter),
         from_zone,
     })
 }
@@ -1278,7 +1291,7 @@ fn substitute_another_in_filter(filter: &TargetFilter) -> TargetFilter {
     }
 }
 
-/// CR 603.4: Rewrite `Another` inside any `ObjectCount` / `ObjectCountDistinctNames`
+/// CR 603.4: Rewrite `Another` inside any `ObjectCount` / `ObjectCountDistinct`
 /// filter carried by a `QuantityExpr`. Leaves non-object-count refs untouched.
 fn substitute_another_in_expr(expr: &QuantityExpr) -> QuantityExpr {
     match expr {
@@ -1290,10 +1303,11 @@ fn substitute_another_in_expr(expr: &QuantityExpr) -> QuantityExpr {
             },
         },
         QuantityExpr::Ref {
-            qty: QuantityRef::ObjectCountDistinctNames { filter },
+            qty: QuantityRef::ObjectCountDistinct { filter, qualities },
         } => QuantityExpr::Ref {
-            qty: QuantityRef::ObjectCountDistinctNames {
+            qty: QuantityRef::ObjectCountDistinct {
                 filter: substitute_another_in_filter(filter),
+                qualities: qualities.clone(),
             },
         },
         QuantityExpr::Offset { inner, offset } => QuantityExpr::Offset {
@@ -6264,10 +6278,10 @@ mod tests {
     use crate::parser::oracle_ir::context::ParseContext;
     use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
     use crate::types::ability::{
-        AbilityCondition, AbilityKind, AggregateFunction, Comparator, ContinuousModification,
-        ControllerRef, CountScope, DamageModification, Duration, Effect, FilterProp, ObjectScope,
-        PlayerFilter, PlayerScope, PtValue, QuantityExpr, QuantityRef, TargetFilter, TypeFilter,
-        TypedFilter, UnlessCost,
+        AbilityCondition, AbilityCost, AbilityKind, AggregateFunction, Comparator,
+        ContinuousModification, ControllerRef, CountScope, DamageModification, Duration, Effect,
+        FilterProp, ObjectScope, PlayerFilter, PlayerScope, PtValue, QuantityExpr, QuantityRef,
+        TargetFilter, TypeFilter, TypedFilter,
     };
     use crate::types::counter::{CounterMatch, CounterType};
     use crate::types::replacements::ReplacementEvent;
@@ -8575,6 +8589,7 @@ mod tests {
                     qty: QuantityRef::DamageDealtThisTurn {
                         source,
                         target,
+                        ..
                     },
                 },
                 comparator: Comparator::GE,
@@ -9479,7 +9494,7 @@ mod tests {
         let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
         assert_eq!(
             unless_pay.cost,
-            UnlessCost::DynamicGeneric {
+            AbilityCost::ManaDynamic {
                 quantity: QuantityExpr::Ref {
                     qty: QuantityRef::Power {
                         scope: crate::types::ability::ObjectScope::Source
@@ -9500,7 +9515,7 @@ mod tests {
         let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
         assert_eq!(unless_pay.payer, TargetFilter::Controller);
         assert!(
-            matches!(unless_pay.cost, UnlessCost::Fixed { .. }),
+            matches!(unless_pay.cost, AbilityCost::Mana { .. }),
             "cost should be Fixed mana, got {:?}",
             unless_pay.cost
         );
@@ -9521,7 +9536,7 @@ mod tests {
         );
         let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
         assert_eq!(unless_pay.payer, TargetFilter::Controller);
-        assert_eq!(unless_pay.cost, UnlessCost::PayEnergy { amount: 2 });
+        assert_eq!(unless_pay.cost, AbilityCost::PayEnergy { amount: 2 });
         let execute = def.execute.as_ref().expect("should have execute");
         assert!(
             matches!(*execute.effect, Effect::Sacrifice { .. }),
@@ -9542,7 +9557,15 @@ mod tests {
         let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
         assert_eq!(unless_pay.payer, TargetFilter::Controller);
         assert!(
-            matches!(unless_pay.cost, UnlessCost::DiscardCard { filter: None }),
+            matches!(
+                unless_pay.cost,
+                AbilityCost::Discard {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    filter: None,
+                    random: false,
+                    self_ref: false
+                }
+            ),
             "cost should be DiscardCard, got {:?}",
             unless_pay.cost
         );
@@ -9564,7 +9587,10 @@ mod tests {
         let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
         assert_eq!(unless_pay.payer, TargetFilter::Controller);
         match &unless_pay.cost {
-            UnlessCost::Sacrifice { count, filter } => {
+            AbilityCost::Sacrifice {
+                count,
+                target: filter,
+            } => {
                 assert_eq!(*count, 1);
                 match filter {
                     TargetFilter::Typed(typed) => {
@@ -9594,7 +9620,12 @@ mod tests {
         let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
         assert_eq!(unless_pay.payer, TargetFilter::Controller);
         assert!(
-            matches!(unless_pay.cost, UnlessCost::PayLife { amount: 1 }),
+            matches!(
+                unless_pay.cost,
+                AbilityCost::PayLife {
+                    amount: QuantityExpr::Fixed { value: 1 }
+                }
+            ),
             "cost should be PayLife {{ amount: 1 }}, got {:?}",
             unless_pay.cost
         );
@@ -9612,7 +9643,12 @@ mod tests {
         let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
         assert_eq!(unless_pay.payer, TargetFilter::Controller);
         assert!(
-            matches!(unless_pay.cost, UnlessCost::PayLife { amount: 2 }),
+            matches!(
+                unless_pay.cost,
+                AbilityCost::PayLife {
+                    amount: QuantityExpr::Fixed { value: 2 }
+                }
+            ),
             "cost should be PayLife {{ amount: 2 }}, got {:?}",
             unless_pay.cost
         );
@@ -9643,7 +9679,12 @@ mod tests {
         let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
         assert_eq!(unless_pay.payer, TargetFilter::TriggeringPlayer);
         assert!(
-            matches!(unless_pay.cost, UnlessCost::PayLife { amount: 2 }),
+            matches!(
+                unless_pay.cost,
+                AbilityCost::PayLife {
+                    amount: QuantityExpr::Fixed { value: 2 }
+                }
+            ),
             "cost should be PayLife {{ amount: 2 }}, got {:?}",
             unless_pay.cost
         );
@@ -9666,8 +9707,9 @@ mod tests {
         );
         let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
         match &unless_pay.cost {
-            UnlessCost::DiscardCard {
+            AbilityCost::Discard {
                 filter: Some(TargetFilter::Typed(typed)),
+                ..
             } => assert!(
                 typed
                     .type_filters
@@ -9676,7 +9718,7 @@ mod tests {
                 "filter should include noncreature, got {:?}",
                 typed.type_filters
             ),
-            other => panic!("cost should be filtered DiscardCard, got {:?}", other),
+            other => panic!("cost should be filtered Discard, got {:?}", other),
         }
     }
 
@@ -9691,9 +9733,9 @@ mod tests {
         let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
         assert_eq!(unless_pay.payer, TargetFilter::Controller);
         match &unless_pay.cost {
-            UnlessCost::ReturnToHand {
+            AbilityCost::ReturnToHand {
                 count,
-                filter,
+                filter: Some(filter),
                 from_zone,
             } => {
                 assert_eq!(*count, 1);
@@ -9734,7 +9776,11 @@ mod tests {
         );
         let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
         match &unless_pay.cost {
-            UnlessCost::ReturnToHand { count, filter, .. } => {
+            AbilityCost::ReturnToHand {
+                count,
+                filter: Some(filter),
+                ..
+            } => {
                 assert_eq!(*count, 1);
                 let has_another_creature = match filter {
                     TargetFilter::And { filters } => filters.iter().any(|f| {
@@ -9769,7 +9815,7 @@ mod tests {
         );
         let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
         match &unless_pay.cost {
-            UnlessCost::ReturnToHand {
+            AbilityCost::ReturnToHand {
                 count, from_zone, ..
             } => {
                 assert_eq!(*count, 2);
@@ -9789,7 +9835,7 @@ mod tests {
         );
         let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
         match &unless_pay.cost {
-            UnlessCost::ReturnToHand {
+            AbilityCost::ReturnToHand {
                 count, from_zone, ..
             } => {
                 assert_eq!(*count, 1);
@@ -9809,10 +9855,10 @@ mod tests {
         );
         let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
         match &unless_pay.cost {
-            UnlessCost::ReturnToHand {
+            AbilityCost::ReturnToHand {
                 count,
                 from_zone,
-                filter,
+                filter: Some(filter),
             } => {
                 assert_eq!(*count, 1);
                 assert_eq!(
@@ -9908,7 +9954,7 @@ mod tests {
         let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
         assert_eq!(unless_pay.payer, TargetFilter::TriggeringPlayer);
         assert!(
-            matches!(unless_pay.cost, UnlessCost::Fixed { .. }),
+            matches!(unless_pay.cost, AbilityCost::Mana { .. }),
             "cost should be Fixed mana, got {:?}",
             unless_pay.cost
         );
@@ -9924,7 +9970,7 @@ mod tests {
         let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
         assert_eq!(unless_pay.payer, TargetFilter::TriggeringPlayer);
         assert!(
-            matches!(unless_pay.cost, UnlessCost::Fixed { .. }),
+            matches!(unless_pay.cost, AbilityCost::Mana { .. }),
             "cost should be Fixed mana, got {:?}",
             unless_pay.cost
         );
@@ -9964,7 +10010,15 @@ mod tests {
         let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
         assert_eq!(unless_pay.payer, TargetFilter::TriggeringPlayer);
         assert!(
-            matches!(unless_pay.cost, UnlessCost::DiscardCard { filter: None }),
+            matches!(
+                unless_pay.cost,
+                AbilityCost::Discard {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    filter: None,
+                    random: false,
+                    self_ref: false
+                }
+            ),
             "cost should be DiscardCard, got {:?}",
             unless_pay.cost
         );
@@ -10001,7 +10055,7 @@ mod tests {
         assert!(
             matches!(
                 unless_pay.cost,
-                UnlessCost::DynamicGeneric {
+                AbilityCost::ManaDynamic {
                     quantity: QuantityExpr::Ref { .. }
                 }
             ),

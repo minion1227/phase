@@ -297,6 +297,41 @@ pub fn resolve_event_context_targets(
         .collect()
 }
 
+/// CR 608.2c + CR 603.10a: Resolve the effective targets for a resolving
+/// ability across the three Oracle-text target sources, in priority order:
+///
+/// 1. **Self-reference**: when the filter is one of `None`, `SelfRef`, or
+///    `ParentTarget` AND `ability.targets` is empty, the subject is the
+///    source object itself (the parser's `~` anaphor / "it" anaphor on
+///    top-level triggers — Academy Rector, Bronzehide Lion, Loyal Cathar).
+///    `TriggeringSource` is deliberately excluded — it resolves via
+///    `resolve_event_context_target` reading `state.current_trigger_event`.
+/// 2. **Event context**: filters like `TriggeringSource`, `DefendingPlayer`,
+///    `AttachedTo` resolve from `state.current_trigger_event` without
+///    requiring player selection (CR 603.7c).
+/// 3. **Pre-selected targets**: the ability's chosen targets from CR 601.2c
+///    casting / CR 603.3d trigger placement.
+///
+/// Returns the targets from the first non-empty tier, owning the result so
+/// callers don't need to branch over which tier resolved.
+pub fn resolved_targets(
+    ability: &ResolvedAbility,
+    target_filter: &TargetFilter,
+    state: &GameState,
+) -> Vec<TargetRef> {
+    let use_self = matches!(
+        target_filter,
+        TargetFilter::None | TargetFilter::SelfRef | TargetFilter::ParentTarget
+    ) && ability.targets.is_empty();
+    if use_self {
+        return vec![TargetRef::Object(ability.source_id)];
+    }
+    if let Some(target) = resolve_event_context_target(state, target_filter, ability.source_id) {
+        return vec![target];
+    }
+    ability.targets.clone()
+}
+
 pub(crate) fn resolve_event_context_target_for_event_or_state(
     state: &GameState,
     filter: &TargetFilter,
@@ -1895,6 +1930,81 @@ mod tests {
             !targets.contains(&TargetRef::Player(PlayerId(1))),
             "protected opponent must not be a legal target, got {:?}",
             targets
+        );
+    }
+
+    fn make_resolved_with_targets(
+        targets: Vec<TargetRef>,
+        source: ObjectId,
+    ) -> crate::types::ability::ResolvedAbility {
+        crate::types::ability::ResolvedAbility::new(
+            crate::types::ability::Effect::Draw {
+                count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            targets,
+            source,
+            PlayerId(0),
+        )
+    }
+
+    /// CR 608.2c + 603.10a: Tier 1 — `SelfRef` with empty `ability.targets`
+    /// resolves to the source object (the parser's `~` anaphor).
+    #[test]
+    fn resolved_targets_self_ref_with_empty_targets_returns_source() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+        let ability = make_resolved_with_targets(vec![], source);
+        let result = resolved_targets(&ability, &TargetFilter::SelfRef, &state);
+        assert_eq!(
+            result,
+            vec![TargetRef::Object(source)],
+            "SelfRef + empty targets should resolve to source object"
+        );
+    }
+
+    /// CR 506.2: Tier 2 — event-context filters like `DefendingPlayer` resolve
+    /// from game state (here, `state.combat.attackers`) without consuming
+    /// `ability.targets`. Verifies the helper routes through the event-context
+    /// tier when it applies and returns its target.
+    #[test]
+    fn resolved_targets_event_context_resolves_from_combat_state() {
+        use crate::game::combat::{AttackTarget, AttackerInfo};
+        let (mut state, _c0, c1) = setup_with_creatures();
+        // Mark c1 as attacking player 0 so DefendingPlayer resolves to player 0.
+        let combat = state.combat.get_or_insert_with(Default::default);
+        combat.attackers.push(AttackerInfo::new(
+            c1,
+            AttackTarget::Player(PlayerId(0)),
+            PlayerId(0),
+        ));
+        let ability = make_resolved_with_targets(vec![], c1);
+        let result = resolved_targets(&ability, &TargetFilter::DefendingPlayer, &state);
+        assert_eq!(
+            result,
+            vec![TargetRef::Player(PlayerId(0))],
+            "DefendingPlayer should resolve to the attacked player"
+        );
+    }
+
+    /// CR 601.2c: Tier 3 — when neither self-ref nor event-context applies,
+    /// fall through to the ability's pre-selected targets.
+    #[test]
+    fn resolved_targets_falls_back_to_ability_targets() {
+        let (state, _c0, c1) = setup_with_creatures();
+        // Use `Any` filter (not self-ref-eligible) and supply a chosen target.
+        let ability = make_resolved_with_targets(vec![TargetRef::Object(c1)], c1);
+        let result = resolved_targets(&ability, &TargetFilter::Any, &state);
+        assert_eq!(
+            result,
+            vec![TargetRef::Object(c1)],
+            "Should fall through to ability.targets when no other tier applies"
         );
     }
 }

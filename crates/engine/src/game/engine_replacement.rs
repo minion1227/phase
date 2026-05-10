@@ -1,5 +1,8 @@
 use crate::ai_support::copy_target_mana_value_ceiling;
-use crate::types::ability::{AbilityDefinition, Effect, ResolvedAbility, TargetFilter, TargetRef};
+use crate::types::ability::{
+    AbilityDefinition, Effect, PostReplacementContinuation, ResolvedAbility, TargetFilter,
+    TargetRef,
+};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
@@ -291,9 +294,7 @@ pub(super) fn handle_replacement_choice(
                 replacement_ctx = Some(ctx);
             }
 
-            if state.post_replacement_effect.is_some()
-                || state.post_replacement_resolved_effect.is_some()
-            {
+            if state.post_replacement_continuation.is_some() {
                 // The ETB-replacement post-effect resolves against the
                 // zone-changing object, not the replacement source — drop the
                 // source slot so it doesn't leak into an unrelated later
@@ -480,12 +481,17 @@ pub(super) fn apply_pending_post_replacement_effect(
     events: &mut Vec<GameEvent>,
 ) -> Option<WaitingFor> {
     let source = state.post_replacement_source.take().or(object_id);
-    let waiting_for = if let Some(resolved) = state.post_replacement_resolved_effect.take() {
-        apply_post_replacement_resolved_effect(state, &resolved, events)
-    } else if let Some(effect_def) = state.post_replacement_effect.take() {
-        apply_post_replacement_effect(state, &effect_def, source, spell_resolution, events)
-    } else {
-        None
+    // CR 614.12a + CR 615.5: Single dispatch on the unified continuation slot.
+    // `Resolved` carries captured targets (prevention follow-ups); `Template`
+    // is an AST that resolves against `source` for ETB / Optional accept.
+    let waiting_for = match state.post_replacement_continuation.take() {
+        Some(PostReplacementContinuation::Resolved(resolved)) => {
+            apply_post_replacement_resolved_effect(state, &resolved, events)
+        }
+        Some(PostReplacementContinuation::Template(effect_def)) => {
+            apply_post_replacement_effect(state, &effect_def, source, spell_resolution, events)
+        }
+        None => None,
     };
     state.post_replacement_event_source = None;
     state.post_replacement_event_target = None;
@@ -674,7 +680,9 @@ mod tests {
     use crate::game::engine::apply_as_current;
     use crate::game::replacement::{self as replacement_mod, ReplacementResult};
     use crate::game::zones::create_object;
-    use crate::types::ability::{ReplacementDefinition, ReplacementMode};
+    use crate::types::ability::{
+        AbilityKind, QuantityExpr, ReplacementDefinition, ReplacementMode,
+    };
     use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
     use crate::types::counter::CounterType;
@@ -1182,5 +1190,182 @@ mod tests {
             !targets.contains(&gy_creature),
             "Clone with no zone filter must not leak into the graveyard"
         );
+    }
+
+    /// 2026-05-09 audit M4 regression: the unified
+    /// `post_replacement_continuation` slot dispatches a `Template` arm by
+    /// resolving the AST against the supplied source — the pre-fold path
+    /// that used `state.post_replacement_effect`.
+    #[test]
+    fn post_replacement_continuation_template_dispatches_against_source() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Lossy Land".to_string(),
+            Zone::Battlefield,
+        );
+        let initial_life = state.players[0].life;
+
+        let template = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::LoseLife {
+                amount: QuantityExpr::Fixed { value: 2 },
+                target: None,
+            },
+        );
+        state.post_replacement_continuation =
+            Some(PostReplacementContinuation::Template(Box::new(template)));
+
+        let mut events = Vec::new();
+        let waiting =
+            apply_pending_post_replacement_effect(&mut state, Some(source), None, &mut events);
+
+        // Resolved cleanly — no follow-up WaitingFor and slot drained.
+        assert!(waiting.is_none(), "Template path resolved without prompt");
+        assert!(state.post_replacement_continuation.is_none());
+        // Source's controller (P0) lost 2 life.
+        assert_eq!(state.players[0].life, initial_life - 2);
+    }
+
+    /// 2026-05-09 audit M4 regression: the unified slot dispatches a
+    /// `Resolved` arm by resolving the captured `ResolvedAbility` directly
+    /// — the pre-fold path that used `state.post_replacement_resolved_effect`
+    /// (e.g. Phyrexian Hydra's runtime-built prevention follow-up).
+    #[test]
+    fn post_replacement_continuation_resolved_dispatches_directly() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Shielded Hydra".to_string(),
+            Zone::Battlefield,
+        );
+        let initial_life = state.players[1].life;
+
+        // Build a resolved follow-up that targets P1 explicitly — emulates the
+        // runtime_execute path where the source/controller and counter quantity
+        // are captured at shield-creation time.
+        let resolved = ResolvedAbility::new(
+            Effect::LoseLife {
+                amount: QuantityExpr::Fixed { value: 3 },
+                target: Some(TargetFilter::Controller),
+            },
+            Vec::new(),
+            source,
+            PlayerId(1),
+        );
+        state.post_replacement_continuation =
+            Some(PostReplacementContinuation::Resolved(Box::new(resolved)));
+
+        let mut events = Vec::new();
+        let waiting =
+            apply_pending_post_replacement_effect(&mut state, Some(source), None, &mut events);
+
+        assert!(waiting.is_none(), "Resolved path resolved without prompt");
+        assert!(state.post_replacement_continuation.is_none());
+        // Resolved ability's own controller (P1) lost 3 life.
+        assert_eq!(state.players[1].life, initial_life - 3);
+    }
+
+    /// 2026-05-09 audit M4 backward-compat: legacy serialized GameState with
+    /// the pre-fold `post_replacement_effect` field (Template binding state)
+    /// migrates into the new unified slot when `finalize_public_state` runs
+    /// (driven here by calling `migrate_post_replacement_continuation`
+    /// directly).
+    #[test]
+    fn migrate_post_replacement_continuation_lifts_legacy_template() {
+        let mut state = GameState::new_two_player(42);
+        let template = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::LoseLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                target: None,
+            },
+        );
+        // Simulate legacy deserialization: only the legacy slot is populated.
+        state.legacy_post_replacement_effect = Some(Box::new(template.clone()));
+        assert!(state.post_replacement_continuation.is_none());
+
+        state.migrate_post_replacement_continuation();
+
+        match state.post_replacement_continuation {
+            Some(PostReplacementContinuation::Template(ref def)) => {
+                assert_eq!(**def, template);
+            }
+            other => panic!("expected Template after migration, got {other:?}"),
+        }
+        assert!(state.legacy_post_replacement_effect.is_none());
+        assert!(state.legacy_post_replacement_resolved_effect.is_none());
+    }
+
+    /// 2026-05-09 audit M4 backward-compat: legacy serialized GameState with
+    /// the pre-fold `post_replacement_resolved_effect` field (Resolved
+    /// binding state) migrates into the new unified slot. Resolved wins over
+    /// Template if both are (impossibly) populated, mirroring the pre-fold
+    /// dispatcher precedence at `apply_pending_post_replacement_effect`.
+    #[test]
+    fn migrate_post_replacement_continuation_lifts_legacy_resolved() {
+        let mut state = GameState::new_two_player(42);
+        let resolved = ResolvedAbility::new(
+            Effect::LoseLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                target: Some(TargetFilter::Controller),
+            },
+            Vec::new(),
+            ObjectId(1),
+            PlayerId(0),
+        );
+        state.legacy_post_replacement_resolved_effect = Some(Box::new(resolved.clone()));
+
+        state.migrate_post_replacement_continuation();
+
+        match state.post_replacement_continuation {
+            Some(PostReplacementContinuation::Resolved(ref boxed)) => {
+                assert_eq!(**boxed, resolved);
+            }
+            other => panic!("expected Resolved after migration, got {other:?}"),
+        }
+        assert!(state.legacy_post_replacement_effect.is_none());
+        assert!(state.legacy_post_replacement_resolved_effect.is_none());
+    }
+
+    /// 2026-05-09 audit M4 backward-compat (defensive): when both legacy
+    /// slots happen to deserialize alongside a new-shape slot — for instance
+    /// because a producer wrote a hybrid blob — the new slot wins and the
+    /// legacy fields are cleared. Migration is idempotent.
+    #[test]
+    fn migrate_post_replacement_continuation_prefers_new_slot_when_present() {
+        let mut state = GameState::new_two_player(42);
+        let new_template = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::LoseLife {
+                amount: QuantityExpr::Fixed { value: 5 },
+                target: None,
+            },
+        );
+        state.post_replacement_continuation = Some(PostReplacementContinuation::Template(
+            Box::new(new_template.clone()),
+        ));
+        // Legacy slots also populated (corrupted/hybrid input).
+        state.legacy_post_replacement_effect = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Untap {
+                target: TargetFilter::SelfRef,
+            },
+        )));
+
+        state.migrate_post_replacement_continuation();
+
+        match state.post_replacement_continuation {
+            Some(PostReplacementContinuation::Template(ref def)) => {
+                assert_eq!(**def, new_template);
+            }
+            other => panic!("new slot must survive migration, got {other:?}"),
+        }
+        assert!(state.legacy_post_replacement_effect.is_none());
+        assert!(state.legacy_post_replacement_resolved_effect.is_none());
     }
 }

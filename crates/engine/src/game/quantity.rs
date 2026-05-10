@@ -142,7 +142,7 @@ pub(crate) fn quantity_expr_uses_recipient(expr: &QuantityExpr) -> bool {
                 player: PlayerScope::RecipientController,
             } => true,
             QuantityRef::ObjectCount { filter }
-            | QuantityRef::ObjectCountDistinctNames { filter }
+            | QuantityRef::ObjectCountDistinct { filter, .. }
             | QuantityRef::DistinctCardTypes {
                 source: CardTypeSetSource::Objects { filter },
             }
@@ -662,35 +662,59 @@ fn resolve_ref(
             };
             usize_to_i32_saturating(adjusted)
         }
-        // CR 201.2 + CR 603.4: Count of distinct names among matching objects.
-        // Field of the Dead: "seven or more lands with different names". Two
-        // objects with the same printed name count once.
+        // CR 201.2 + CR 603.4: Count of objects matching `filter`,
+        // deduplicated by the listed `qualities`. Each object contributes a
+        // tuple-key formed from its values per quality; objects whose tuples
+        // coincide count once. Objects with no value for a quality (empty
+        // name, missing power, etc.) get a per-object sentinel for that
+        // axis, so they are counted but not deduped against one another —
+        // matching the legacy `ObjectCountDistinctNames` invariant for
+        // unnamed objects.
         //
-        // CR 201.2a: Sameness is defined by printed name, so read `base_name`
-        // (not the layer-applied `name`) to match how CR defines object
-        // identity. Objects with no name do not share a name with any other
-        // object, including one another — they are each individually unique,
-        // so they are counted but not deduped.
-        QuantityRef::ObjectCountDistinctNames { filter } => {
+        // Lifts the legacy `ObjectCountDistinctNames` resolver onto the same
+        // `Vec<SharedQuality>` axis used by
+        // `SearchSelectionConstraint::DistinctQualities`. Both sides share
+        // the `crate::game::filter::object_shared_quality_values` extractor,
+        // keeping the count-expression and constraint vocabularies aligned.
+        QuantityRef::ObjectCountDistinct { filter, qualities } => {
             let zone = filter
                 .extract_in_zone()
                 .unwrap_or(crate::types::zones::Zone::Battlefield);
-            let mut distinct_named: std::collections::HashSet<String> =
+            // Per-object signature: for each quality, a sorted Vec<String> of
+            // the object's values for that quality. Empty values get a
+            // per-object sentinel so unnamed/unstatted objects each count as
+            // distinct on that axis (preserving the legacy invariant).
+            let mut signatures: std::collections::HashSet<Vec<Vec<String>>> =
                 std::collections::HashSet::new();
-            let mut unnamed_count: usize = 0;
             for id in crate::game::targeting::zone_object_ids(state, zone) {
                 if !matches_target_filter(state, id, filter, &filter_ctx) {
                     continue;
                 }
-                if let Some(obj) = state.objects.get(&id) {
-                    if obj.base_name.is_empty() {
-                        unnamed_count += 1;
-                    } else {
-                        distinct_named.insert(obj.base_name.clone());
-                    }
-                }
+                let Some(obj) = state.objects.get(&id) else {
+                    continue;
+                };
+                let signature: Vec<Vec<String>> = qualities
+                    .iter()
+                    .map(|quality| {
+                        let values = crate::game::filter::object_shared_quality_values_public(
+                            obj,
+                            quality,
+                            &state.all_creature_types,
+                        );
+                        if values.is_empty() {
+                            // Per-object sentinel: empty-value objects are
+                            // each individually unique on this axis.
+                            vec![format!("__unique_{}__", id.0)]
+                        } else {
+                            let mut sorted: Vec<String> = values.into_iter().collect();
+                            sorted.sort();
+                            sorted
+                        }
+                    })
+                    .collect();
+                signatures.insert(signature);
             }
-            usize_to_i32_saturating(distinct_named.len() + unnamed_count)
+            usize_to_i32_saturating(signatures.len())
         }
         QuantityRef::PlayerCount { filter } => {
             resolve_player_count(state, filter, controller, source_id)
@@ -1198,12 +1222,7 @@ fn resolve_ref(
                         ControllerRef::TargetPlayer => target_player == Some(obj.controller),
                         ControllerRef::ParentTargetController => ability
                             .and_then(|ability| {
-                                ability.targets.iter().find_map(|target| match target {
-                                    TargetRef::Object(id) => {
-                                        state.objects.get(id).map(|obj| obj.controller)
-                                    }
-                                    TargetRef::Player(player) => Some(*player),
-                                })
+                                crate::game::ability_utils::parent_target_controller(ability, state)
                             })
                             .is_some_and(|player| player == obj.controller),
                         ControllerRef::DefendingPlayer => {
@@ -1308,44 +1327,25 @@ fn resolve_ref(
                 })
                 .count(),
         ),
-        QuantityRef::MaxDamageDealtThisTurnBySourceControlledBy {
-            controller: source_controller,
-        } => {
-            let mut totals: HashMap<ObjectId, u32> = HashMap::new();
-            for record in &state.damage_dealt_this_turn {
-                if damage_source_controller_matches(
-                    state,
-                    record.source_controller,
-                    controller,
-                    ctx,
-                    ability,
-                    source_controller,
-                ) {
-                    totals
-                        .entry(record.source_id)
-                        .and_modify(|total| *total = total.saturating_add(record.amount))
-                        .or_insert(record.amount);
-                }
-            }
-            totals
-                .values()
-                .copied()
-                .max()
-                .map(u32_to_i32_saturating)
-                .unwrap_or(0)
-        }
-        // CR 120.1 + CR 603.4: Sum this turn's damage events whose source
-        // object and recipient match the supplied filters.
-        QuantityRef::DamageDealtThisTurn { source, target } => u32_to_i32_saturating(
-            state
-                .damage_dealt_this_turn
-                .iter()
-                .filter(|record| {
-                    damage_record_source_matches(state, record.source_id, source, &filter_ctx)
-                        && damage_record_target_matches(state, &record.target, target, &filter_ctx)
-                })
-                .map(|record| record.amount)
-                .sum(),
+        // CR 120.1 + CR 120.9 + CR 603.4: Damage dealt this turn matching the
+        // supplied source/target filters. `group_by` selects whether records are
+        // partitioned (per CR 120.9 "by a specific source") before `aggregate`
+        // collapses each group's sum into a single value.
+        QuantityRef::DamageDealtThisTurn {
+            source,
+            target,
+            aggregate,
+            group_by,
+        } => resolve_damage_dealt_this_turn(
+            state,
+            controller,
+            ctx,
+            ability,
+            &filter_ctx,
+            source,
+            target,
+            *aggregate,
+            *group_by,
         ),
         // CR 500: Cumulative turns taken by this player.
         QuantityRef::TurnsTaken => player.map_or(0, |p| u32_to_i32_saturating(p.turns_taken)),
@@ -1506,12 +1506,7 @@ fn resolve_ref(
                             .is_some_and(|pid| pid == snap.controller),
                         Some(ControllerRef::ParentTargetController) => ability
                             .and_then(|a| {
-                                a.targets.iter().find_map(|t| match t {
-                                    TargetRef::Object(id) => {
-                                        state.objects.get(id).map(|obj| obj.controller)
-                                    }
-                                    TargetRef::Player(pid) => Some(*pid),
-                                })
+                                crate::game::ability_utils::parent_target_controller(a, state)
                             })
                             .is_some_and(|pid| pid == snap.controller),
                         Some(ControllerRef::DefendingPlayer) => {
@@ -1556,10 +1551,7 @@ fn damage_source_controller_matches(
             .is_some_and(|player| actual == player),
         ControllerRef::ParentTargetController => ability
             .and_then(|ability| {
-                ability.targets.iter().find_map(|target| match target {
-                    TargetRef::Object(id) => state.objects.get(id).map(|obj| obj.controller),
-                    TargetRef::Player(player) => Some(*player),
-                })
+                crate::game::ability_utils::parent_target_controller(ability, state)
             })
             .is_some_and(|player| actual == player),
         ControllerRef::DefendingPlayer => {
@@ -1621,6 +1613,97 @@ fn damage_record_source_matches(
     ctx: &FilterContext<'_>,
 ) -> bool {
     matches_target_filter(state, source_id, filter, ctx)
+}
+
+/// CR 120.1 + CR 120.9 + CR 603.4: Resolver for `QuantityRef::DamageDealtThisTurn`.
+///
+/// Walks `state.damage_dealt_this_turn`, filters records whose source/target
+/// match the supplied filters, then either sums every match (no `group_by`) or
+/// partitions by the group key, sums each partition, and applies `aggregate`
+/// across the per-group sums (CR 120.9 "by a specific source").
+#[allow(clippy::too_many_arguments)]
+fn resolve_damage_dealt_this_turn(
+    state: &GameState,
+    controller: PlayerId,
+    ctx: QuantityContext,
+    ability: Option<&ResolvedAbility>,
+    filter_ctx: &FilterContext<'_>,
+    source: &TargetFilter,
+    target: &TargetFilter,
+    aggregate: AggregateFunction,
+    group_by: Option<crate::types::ability::DamageGroupKey>,
+) -> i32 {
+    use crate::types::ability::DamageGroupKey;
+
+    // CR 120.9: Apply the source filter's `controller` predicate (if any)
+    // against `record.source_controller` (LKI at time of damage), so a control
+    // change between damage and check still answers the rules-correct question.
+    // Pass the rest of the filter (controller stripped) through the live-source
+    // matcher for type/property predicates.
+    let (live_source_filter, lki_controller) = split_source_controller(source);
+    let live_source_filter_ref: &TargetFilter = live_source_filter.as_ref().unwrap_or(source);
+
+    let source_matches = |record_source_id: ObjectId, record_source_controller: PlayerId| {
+        if let Some(expected) = lki_controller.as_ref() {
+            if !damage_source_controller_matches(
+                state,
+                record_source_controller,
+                controller,
+                ctx,
+                ability,
+                expected,
+            ) {
+                return false;
+            }
+        }
+        damage_record_source_matches(state, record_source_id, live_source_filter_ref, filter_ctx)
+    };
+
+    let matching = state.damage_dealt_this_turn.iter().filter(|record| {
+        source_matches(record.source_id, record.source_controller)
+            && damage_record_target_matches(state, &record.target, target, filter_ctx)
+    });
+
+    match group_by {
+        // No grouping: every matching record is a single bucket, so `aggregate`
+        // collapses to a sum (Max/Min/Sum over a one-element set all coincide
+        // with the total sum).
+        None => u32_to_i32_saturating(matching.map(|record| record.amount).sum()),
+        Some(DamageGroupKey::SourceId) => {
+            let mut totals: HashMap<ObjectId, u32> = HashMap::new();
+            for record in matching {
+                totals
+                    .entry(record.source_id)
+                    .and_modify(|total| *total = total.saturating_add(record.amount))
+                    .or_insert(record.amount);
+            }
+            let aggregated: Option<u32> = match aggregate {
+                AggregateFunction::Max => totals.values().copied().max(),
+                AggregateFunction::Min => totals.values().copied().min(),
+                AggregateFunction::Sum => Some(totals.values().copied().sum()),
+            };
+            aggregated.map(u32_to_i32_saturating).unwrap_or(0)
+        }
+    }
+}
+
+/// Split a source filter into (controller-stripped clone, lifted controller).
+///
+/// CR 120.9: The controller predicate on a damage-history source filter must
+/// be evaluated against `DamageRecord::source_controller` (LKI), not against
+/// the live source object's controller — control of a source can change
+/// between damage and check. Returns `(None, None)` when the filter has no
+/// controller predicate to lift, so callers can use the original filter
+/// reference without a heap allocation.
+fn split_source_controller(filter: &TargetFilter) -> (Option<TargetFilter>, Option<ControllerRef>) {
+    match filter {
+        TargetFilter::Typed(typed) if typed.controller.is_some() => {
+            let mut stripped = typed.clone();
+            let controller = stripped.controller.take();
+            (Some(TargetFilter::Typed(stripped)), controller)
+        }
+        _ => (None, None),
+    }
 }
 
 fn damage_record_target_matches(
@@ -2247,7 +2330,8 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AggregateFunction, ChoiceValue, ControllerRef, DevotionColors, Effect, FilterProp,
-        KickerVariant, ObjectProperty, TargetFilter, TargetRef, TypeFilter, TypedFilter,
+        KickerVariant, ObjectProperty, SharedQuality, TargetFilter, TargetRef, TypeFilter,
+        TypedFilter,
     };
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::counter::CounterType;
@@ -2835,12 +2919,61 @@ mod tests {
             properties: vec![],
         });
         let expr = QuantityExpr::Ref {
-            qty: QuantityRef::ObjectCountDistinctNames { filter },
+            qty: QuantityRef::ObjectCountDistinct {
+                filter,
+                qualities: vec![SharedQuality::Name],
+            },
         };
         // 3 distinct names controlled by P0: Plains, Island, Field of the Dead.
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(0)), 3);
         // P1's POV: only the one opponent Plains would be theirs, so 1.
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(1), ObjectId(0)), 1);
+    }
+
+    /// M7 lift regression: switching the dedup axis from Name → ManaValue must
+    /// produce the count of distinct mana values among the matching objects.
+    /// Proves the parameterized resolver dispatches on `qualities` rather than
+    /// hardcoding the legacy name-only path.
+    #[test]
+    fn resolve_quantity_object_count_distinct_mana_values_uses_mana_value_axis() {
+        let mut state = GameState::new_two_player(42);
+        // Three objects: two with mana value 2 (one shared bucket), one with
+        // mana value 4. Distinct mana values = 2.
+        for cost in &[
+            ManaCost::Cost {
+                shards: vec![],
+                generic: 2,
+            },
+            ManaCost::Cost {
+                shards: vec![],
+                generic: 2,
+            },
+            ManaCost::Cost {
+                shards: vec![],
+                generic: 4,
+            },
+        ] {
+            let id = create_object(
+                &mut state,
+                CardId(200),
+                PlayerId(0),
+                "Generic Card".to_string(),
+                Zone::Battlefield,
+            );
+            state.objects.get_mut(&id).unwrap().mana_cost = cost.clone();
+        }
+        let filter = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![],
+            controller: Some(ControllerRef::You),
+            properties: vec![],
+        });
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCountDistinct {
+                filter,
+                qualities: vec![SharedQuality::ManaValue],
+            },
+        };
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(0)), 2);
     }
 
     #[test]
@@ -3180,8 +3313,13 @@ mod tests {
         ]);
 
         let expr = QuantityExpr::Ref {
-            qty: QuantityRef::MaxDamageDealtThisTurnBySourceControlledBy {
-                controller: ControllerRef::You,
+            qty: QuantityRef::DamageDealtThisTurn {
+                source: Box::new(TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::You),
+                )),
+                target: Box::new(TargetFilter::Any),
+                aggregate: AggregateFunction::Max,
+                group_by: Some(crate::types::ability::DamageGroupKey::SourceId),
             },
         };
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), source), 5);
@@ -3228,6 +3366,8 @@ mod tests {
                 target: Box::new(TargetFilter::Typed(
                     TypedFilter::default().controller(ControllerRef::Opponent),
                 )),
+                aggregate: AggregateFunction::Sum,
+                group_by: None,
             },
         };
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), source), 1);
@@ -3262,9 +3402,190 @@ mod tests {
             qty: QuantityRef::DamageDealtThisTurn {
                 source: Box::new(TargetFilter::Any),
                 target: Box::new(TargetFilter::SelfRef),
+                aggregate: AggregateFunction::Sum,
+                group_by: None,
             },
         };
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), source), 1);
+    }
+
+    /// CR 120.9 (audit M2): the parameterized `DamageDealtThisTurn` with
+    /// `aggregate: Max, group_by: Some(SourceId)` must yield the same answer
+    /// as the removed `MaxDamageDealtThisTurnBySourceControlledBy` did. Two
+    /// p0-controlled sources contribute 5 (Lightning Rig: 3+2) and 4 (Spark
+    /// Rig); Max picks 5. P1's lone source contributes 9.
+    #[test]
+    fn parameterized_damage_dealt_this_turn_max_matches_legacy_max_semantics() {
+        use crate::types::ability::DamageGroupKey;
+
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1000),
+            PlayerId(0),
+            "Dragon Cultist".to_string(),
+            Zone::Battlefield,
+        );
+        let p0_source = create_object(
+            &mut state,
+            CardId(1001),
+            PlayerId(0),
+            "Lightning Rig".to_string(),
+            Zone::Battlefield,
+        );
+        let p0_other = create_object(
+            &mut state,
+            CardId(1002),
+            PlayerId(0),
+            "Spark Rig".to_string(),
+            Zone::Battlefield,
+        );
+        let p1_source = create_object(
+            &mut state,
+            CardId(1003),
+            PlayerId(1),
+            "Opposing Rig".to_string(),
+            Zone::Battlefield,
+        );
+        state.damage_dealt_this_turn.extend([
+            DamageRecord {
+                source_id: p0_source,
+                source_controller: PlayerId(0),
+                target: TargetRef::Player(PlayerId(1)),
+                amount: 3,
+                is_combat: false,
+            },
+            DamageRecord {
+                source_id: p0_source,
+                source_controller: PlayerId(0),
+                target: TargetRef::Player(PlayerId(1)),
+                amount: 2,
+                is_combat: false,
+            },
+            DamageRecord {
+                source_id: p0_other,
+                source_controller: PlayerId(0),
+                target: TargetRef::Player(PlayerId(1)),
+                amount: 4,
+                is_combat: false,
+            },
+            DamageRecord {
+                source_id: p1_source,
+                source_controller: PlayerId(1),
+                target: TargetRef::Player(PlayerId(0)),
+                amount: 9,
+                is_combat: false,
+            },
+        ]);
+
+        let your_max = QuantityExpr::Ref {
+            qty: QuantityRef::DamageDealtThisTurn {
+                source: Box::new(TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::You),
+                )),
+                target: Box::new(TargetFilter::Any),
+                aggregate: AggregateFunction::Max,
+                group_by: Some(DamageGroupKey::SourceId),
+            },
+        };
+        // P0's single largest source contribution is 5 (Lightning Rig: 3+2),
+        // not 9 (P1's source) — controller predicate evaluated against
+        // record.source_controller (LKI per CR 120.9).
+        assert_eq!(resolve_quantity(&state, &your_max, PlayerId(0), source), 5);
+        assert_eq!(resolve_quantity(&state, &your_max, PlayerId(1), source), 9);
+    }
+
+    /// CR 120.9 (audit M2): the source filter's `controller` predicate must be
+    /// evaluated against `DamageRecord::source_controller` (LKI captured at the
+    /// time of damage), not against the live source object's current controller.
+    /// If the live object's controller has changed (e.g., Threaten effect) since
+    /// the damage was dealt, "a source you controlled dealt damage this turn"
+    /// must still credit the original controller.
+    #[test]
+    fn parameterized_damage_dealt_this_turn_uses_lki_controller_after_control_change() {
+        use crate::types::ability::DamageGroupKey;
+
+        let mut state = GameState::new_two_player(42);
+        let scoping = create_object(
+            &mut state,
+            CardId(1000),
+            PlayerId(0),
+            "Scope".to_string(),
+            Zone::Battlefield,
+        );
+        let damage_source = create_object(
+            &mut state,
+            CardId(1001),
+            PlayerId(0),
+            "Goblin Piker".to_string(),
+            Zone::Battlefield,
+        );
+        // Damage was dealt while P0 controlled the source.
+        state.damage_dealt_this_turn.push(DamageRecord {
+            source_id: damage_source,
+            source_controller: PlayerId(0),
+            target: TargetRef::Player(PlayerId(1)),
+            amount: 4,
+            is_combat: false,
+        });
+        // Then control changed (e.g., Threaten); the live object now belongs to P1.
+        state.objects.get_mut(&damage_source).unwrap().controller = PlayerId(1);
+
+        let your_max = QuantityExpr::Ref {
+            qty: QuantityRef::DamageDealtThisTurn {
+                source: Box::new(TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::You),
+                )),
+                target: Box::new(TargetFilter::Any),
+                aggregate: AggregateFunction::Max,
+                group_by: Some(DamageGroupKey::SourceId),
+            },
+        };
+        // P0 still sees their 4 damage even though the live source is now P1's.
+        assert_eq!(resolve_quantity(&state, &your_max, PlayerId(0), scoping), 4);
+        // P1 sees nothing — they didn't control the source when the damage occurred.
+        assert_eq!(resolve_quantity(&state, &your_max, PlayerId(1), scoping), 0);
+    }
+
+    /// Audit M2 backward-compat: a JSON snapshot of the pre-parameterization
+    /// `DamageDealtThisTurn { source, target }` form must deserialize via the
+    /// `#[serde(default)]` defaults (`aggregate: Sum`, `group_by: None`) so
+    /// existing serialized state continues to work.
+    #[test]
+    fn parameterized_damage_dealt_this_turn_legacy_json_deserializes_with_defaults() {
+        use crate::types::ability::DamageGroupKey;
+
+        let legacy_json = r#"{
+            "type": "DamageDealtThisTurn",
+            "source": { "type": "Any" },
+            "target": { "type": "SelfRef" }
+        }"#;
+        let parsed: QuantityRef =
+            serde_json::from_str(legacy_json).expect("legacy JSON must deserialize");
+        match parsed {
+            QuantityRef::DamageDealtThisTurn {
+                source,
+                target,
+                aggregate,
+                group_by,
+            } => {
+                assert_eq!(*source, TargetFilter::Any);
+                assert_eq!(*target, TargetFilter::SelfRef);
+                assert_eq!(aggregate, AggregateFunction::Sum);
+                assert_eq!(group_by, None);
+                // Sanity: an explicit Max+SourceId still round-trips.
+                let new_form = QuantityRef::DamageDealtThisTurn {
+                    source: Box::new(TargetFilter::Any),
+                    target: Box::new(TargetFilter::Any),
+                    aggregate: AggregateFunction::Max,
+                    group_by: Some(DamageGroupKey::SourceId),
+                };
+                let round_trip: QuantityRef =
+                    serde_json::from_str(&serde_json::to_string(&new_form).unwrap()).unwrap();
+                assert_eq!(round_trip, new_form);
+            }
+            other => panic!("expected DamageDealtThisTurn, got {other:?}"),
+        }
     }
 
     // CR 603.10a + CR 603.6e: Hateful Eidolon's "for each Aura you controlled that
@@ -4300,7 +4621,7 @@ mod tests {
                     colors: vec![ManaColor::Blue],
                     mana_value: 3,
                     has_x_in_cost: false,
-                    from_zone: None,
+                    from_zone: Zone::Hand,
                 },
                 SpellCastRecord {
                     core_types: vec![CoreType::Artifact],
@@ -4310,7 +4631,7 @@ mod tests {
                     colors: vec![],
                     mana_value: 1,
                     has_x_in_cost: false,
-                    from_zone: None,
+                    from_zone: Zone::Hand,
                 },
             ],
         );

@@ -226,8 +226,14 @@ impl AbilityCost {
                 resolved <= current
             }
             // CR 601.2b: Returning N permanents to hand requires N permanents
-            // controlled by player matching filter.
-            AbilityCost::ReturnToHand { count, filter } => {
+            // controlled by player matching filter. The `from_zone` axis is
+            // only consumed by the unless-payment path, never by activation
+            // costs — the standard battlefield-source check is correct here.
+            AbilityCost::ReturnToHand {
+                count,
+                filter,
+                from_zone: _,
+            } => {
                 super::casting::find_eligible_return_to_hand_targets(
                     state,
                     player,
@@ -311,6 +317,12 @@ impl AbilityCost {
             // CR 601.2b: Unimplemented costs are conservatively treated as payable
             // so the existing `Unimplemented` fallback paths are not further gated.
             AbilityCost::Unimplemented { .. } => true,
+            // CR 118.4 + CR 107.3c: Dynamic-generic mana primarily appears in
+            // unless-pay contexts. The activation-time payability check
+            // resolves the quantity to a fixed amount and treats the cost as
+            // mana — same as `AbilityCost::Mana { .. }` (whose mana
+            // affordability is delegated to CR 601.2g per the comment above).
+            AbilityCost::ManaDynamic { .. } => true,
         }
     }
 }

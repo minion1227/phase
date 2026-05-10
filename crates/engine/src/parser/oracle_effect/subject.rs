@@ -295,6 +295,7 @@ fn build_additive_type_continuous_clause(
         multi_target: None,
         condition: None,
         optional: false,
+        unless_pay: None,
     })
 }
 
@@ -343,6 +344,7 @@ fn try_parse_subject_restriction_clause(
             sub_ability: None,
             condition: None,
             optional: false,
+            unless_pay: None,
         });
     }
 
@@ -398,6 +400,7 @@ fn try_parse_subject_restriction_clause(
             sub_ability: None,
             condition: None,
             optional: false,
+            unless_pay: None,
         });
     }
 
@@ -455,6 +458,7 @@ fn try_parse_can_attack_with_defender(
         multi_target: None,
         condition: None,
         optional: false,
+        unless_pay: None,
     })
 }
 
@@ -1149,6 +1153,7 @@ fn try_split_pump_compound(
         multi_target: None,
         condition: None,
         optional: false,
+        unless_pay: None,
     })
 }
 
@@ -1179,6 +1184,7 @@ fn build_continuous_clause(
             multi_target: None,
             condition: None,
             optional: false,
+            unless_pay: None,
         });
     }
 
@@ -1217,6 +1223,7 @@ fn build_continuous_clause(
             multi_target: None,
             condition: None,
             optional: false,
+            unless_pay: None,
         });
     }
 
@@ -1256,6 +1263,7 @@ fn build_continuous_clause(
         multi_target: None,
         condition: None,
         optional: false,
+        unless_pay: None,
     })
 }
 
@@ -1472,6 +1480,7 @@ fn build_become_clause(
             multi_target: None,
             condition: None,
             optional: false,
+            unless_pay: None,
         });
     }
 
@@ -1510,6 +1519,7 @@ fn build_become_clause(
         multi_target: None,
         condition: None,
         optional: false,
+        unless_pay: None,
     })
 }
 
@@ -1580,6 +1590,7 @@ fn try_parse_become_and_attack_if_able(
         multi_target: application.multi_target.clone(),
         condition: None,
         optional: false,
+        unless_pay: None,
     })
 }
 
@@ -1662,6 +1673,7 @@ fn try_parse_set_life_total(
         multi_target: None,
         condition: None,
         optional: false,
+        unless_pay: None,
     })
 }
 
@@ -1740,6 +1752,7 @@ fn try_parse_become_choice(
         multi_target: None,
         condition: None,
         optional: false,
+        unless_pay: None,
     })
 }
 
@@ -1796,6 +1809,7 @@ fn build_life_lock_clause(scope_filter: TargetFilter) -> ParsedEffectClause {
         sub_ability: None,
         condition: None,
         optional: false,
+        unless_pay: None,
     }
 }
 
@@ -1865,6 +1879,7 @@ fn build_restriction_clause(
         multi_target: None,
         condition: None,
         optional: false,
+        unless_pay: None,
     })
 }
 
