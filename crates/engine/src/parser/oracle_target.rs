@@ -137,7 +137,15 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
     // over-stripping. The recursion re-enters parse_target_with_ctx where the
     // bare-"random " arm below sets the selection mode on `ctx`.
     if let Ok((after_article, _)) = alt((
+        // CR 115.1: Ordinal targets — "a second", "a third", etc. — surface
+        // distinctness over multi-target effects (Cone of Flame, Serpentine
+        // Spike). The article is structural; the ordinal is enforced by the
+        // multi-target machinery rather than the filter, so they collapse to
+        // the same bare-"target" arm as "a "/"an ".
         tag::<_, _, OracleError<'_>>("a second "),
+        tag("a third "),
+        tag("a fourth "),
+        tag("a fifth "),
         tag("a "),
         tag("an "),
     ))
@@ -152,6 +160,18 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
         {
             let original_rest = &text[lower.len() - after_article.len()..];
             return parse_target_with_ctx(original_rest, ctx);
+        }
+        // CR 115.1: Bare-trailing "target" with no following type word — the
+        // recipient is the multi-target chain's terminal slot ("a third
+        // target", Cone of Flame). Recurse on the original-case offset so the
+        // bare-target arm below resolves to `TargetFilter::Any`.
+        if let Ok((rest_after_target, _)) =
+            tag::<_, _, OracleError<'_>>("target").parse(after_article)
+        {
+            if rest_after_target.is_empty() || rest_after_target.starts_with([',', '.']) {
+                let original_rest = &text[lower.len() - after_article.len()..];
+                return parse_target_with_ctx(original_rest, ctx);
+            }
         }
     }
 
@@ -403,6 +423,17 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
     {
         if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(*phrase).parse(lower.as_str()) {
             return (TargetFilter::SelfRef, &text[lower.len() - rest.len()..]);
+        }
+    }
+
+    // CR 115.1: Bare "target" with no following type phrase — terminal usage in
+    // multi-target damage chains ("3 damage to a third target", Cone of Flame /
+    // Serpentine Spike). The recipient is otherwise unspecified; resolves to
+    // any legal target. Boundary check ensures we don't swallow "targeted" /
+    // "targets" or the leading word of "target creature".
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("target").parse(lower.as_str()) {
+        if rest.is_empty() || rest.starts_with([',', '.']) {
+            return (TargetFilter::Any, &text[lower.len() - rest.len()..]);
         }
     }
 

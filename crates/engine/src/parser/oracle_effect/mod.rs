@@ -5228,6 +5228,181 @@ fn try_parse_compound_object_player_damage(lower: &str) -> Option<ParsedEffectCl
     })
 }
 
+/// CR 120.2b + CR 608.2c: Multi-target damage split (Cone of Flame, Banshee,
+/// Serpentine Spike, Spinal Embrace class). One source emits N independent
+/// `DealDamage` events whose amounts and targets vary, separated by commas
+/// (with `and` introducing the final segment). Each segment after the first
+/// is bare-form — `"M damage to T2"` without a leading "deals" verb — and
+/// inherits the source object from the printed sentence.
+///
+/// Build shape:
+///   primary = `DealDamage { amount_1, target_1 }`
+///   primary.sub_ability = `DealDamage { amount_2, target_2 }`
+///   primary.sub_ability.sub_ability = `DealDamage { amount_3, target_3 }`
+///
+/// Each segment is parsed via [`parse_bare_damage_continuation`] and chained
+/// as a `sub_ability`. Returns `None` (and does not mutate `ctx`) if the text
+/// is not a multi-segment damage line — control returns to the caller for the
+/// single-and compound splitter and other paths.
+fn try_parse_multi_target_damage_chain(
+    text: &str,
+    ctx: &mut ParseContext,
+) -> Option<ParsedEffectClause> {
+    let lower = text.to_lowercase();
+    let (primary_effect, remainder) = try_parse_damage_with_remainder(text, &lower, ctx)?;
+    let trimmed = remainder.trim_start();
+    let trimmed_lower = trimmed.to_lowercase();
+    if tag::<_, _, OracleError<'_>>(", ")
+        .parse(trimmed_lower.as_str())
+        .is_err()
+    {
+        // No comma after the primary recipient — fall back to single-and
+        // compound or single-target damage.
+        return None;
+    }
+
+    // Walk the comma-delimited continuation list. Each iteration either
+    // consumes one bare-damage segment (returning the next AbilityDefinition)
+    // or aborts the entire chain — partial parses are not committed.
+    let mut segments: Vec<Effect> = Vec::new();
+    let mut cursor = remainder.trim_start();
+    while !cursor.is_empty() {
+        let cursor_lower = cursor.to_lowercase();
+        let after_separator = if let Ok((rest, _)) =
+            tag::<_, _, OracleError<'_>>(", and ").parse(cursor_lower.as_str())
+        {
+            &cursor[cursor_lower.len() - rest.len()..]
+        } else if let Ok((rest, _)) =
+            tag::<_, _, OracleError<'_>>(", ").parse(cursor_lower.as_str())
+        {
+            &cursor[cursor_lower.len() - rest.len()..]
+        } else {
+            // Trailing punctuation only — clean end of chain.
+            let rest_trimmed = cursor.trim_end_matches('.').trim();
+            if rest_trimmed.is_empty() {
+                break;
+            }
+            return None;
+        };
+
+        let (segment_effect, leftover) = parse_bare_damage_continuation(after_separator, ctx)?;
+        segments.push(segment_effect);
+        cursor = leftover.trim_start();
+    }
+
+    if segments.is_empty() {
+        return None;
+    }
+
+    // Build the chain bottom-up so each segment becomes the `sub_ability` of
+    // the previous one. Effects beyond the primary share the primary's
+    // damage-source semantics by construction (each is a `DealDamage` with
+    // `damage_source: None`).
+    let mut chain_tail: Option<Box<AbilityDefinition>> = None;
+    for effect in segments.into_iter().rev() {
+        let mut def = AbilityDefinition::new(AbilityKind::Spell, effect);
+        def.sub_ability = chain_tail.take();
+        chain_tail = Some(Box::new(def));
+    }
+
+    Some(ParsedEffectClause {
+        effect: primary_effect,
+        duration: None,
+        sub_ability: chain_tail,
+        distribute: None,
+        multi_target: None,
+        condition: None,
+        optional: false,
+        unless_pay: None,
+    })
+}
+
+/// Parse one bare-form damage continuation: `"N damage to T"` (no leading
+/// "deals" verb), with optional `, rounded up/down` qualifier and required
+/// `to <target>` recipient. Returns the parsed `DealDamage` effect and the
+/// post-recipient remainder.
+///
+/// Accepts the same amount shapes as [`try_parse_damage_with_remainder`]
+/// (fixed numbers, `half X`, `that much`, `twice that much`, etc.) by
+/// delegating to [`oracle_util::parse_count_expr`]. The recipient is parsed
+/// through [`parse_target_with_ctx`], same as the primary segment.
+fn parse_bare_damage_continuation<'a>(
+    text: &'a str,
+    ctx: &mut ParseContext,
+) -> Option<(Effect, &'a str)> {
+    let lower = text.to_lowercase();
+    let (amount, after_damage_offset) =
+        if let Some((qty, rest)) = super::oracle_util::parse_count_expr(&lower) {
+            if tag::<_, _, OracleError<'_>>("damage").parse(rest).is_ok() {
+                // Compute the byte offset of the post-`damage` slice in the
+                // original-case string. Both `text` and `lower` share the same
+                // ASCII byte length.
+                let after_amount = text.len() - rest.len();
+                let after_damage = after_amount + "damage".len();
+                (qty, after_damage)
+            } else {
+                return None;
+            }
+        } else if let Ok((rest, _)) =
+            tag::<_, _, OracleError<'_>>("twice that much damage").parse(lower.as_str())
+        {
+            let consumed = lower.len() - rest.len();
+            (
+                QuantityExpr::Multiply {
+                    factor: 2,
+                    inner: Box::new(QuantityExpr::Ref {
+                        qty: QuantityRef::EventContextAmount,
+                    }),
+                },
+                consumed,
+            )
+        } else if let Ok((rest, _)) =
+            tag::<_, _, OracleError<'_>>("that much damage").parse(lower.as_str())
+        {
+            let consumed = lower.len() - rest.len();
+            (
+                QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                },
+                consumed,
+            )
+        } else {
+            return None;
+        };
+
+    let after_damage = &text[after_damage_offset..];
+    let (amount, after_target) = absorb_trailing_rounding_suffix(amount, after_damage);
+    let trimmed = after_target.trim();
+    let trimmed_lower = trimmed.to_lowercase();
+    let after_to = match opt(tag::<_, _, OracleError<'_>>("to ")).parse(trimmed_lower.as_str()) {
+        Ok((rest_lower, _)) => trimmed[trimmed_lower.len() - rest_lower.len()..].trim(),
+        Err(_) => trimmed,
+    };
+    if after_to.is_empty() {
+        // Bare segment with inherited target ("deals 1 damage, then 2 more
+        // damage" — vanishingly rare, but no recipient means ParentTarget).
+        return Some((
+            Effect::DealDamage {
+                amount,
+                target: TargetFilter::ParentTarget,
+                damage_source: None,
+            },
+            "",
+        ));
+    }
+    let (target, rem) = parse_target_with_ctx(after_to, ctx);
+    let (target, rem) = refine_damage_target_remainder(target, rem);
+    let rem = trim_dangling_target_word(rem);
+    Some((
+        Effect::DealDamage {
+            amount,
+            target,
+            damage_source: None,
+        },
+        rem,
+    ))
+}
+
 fn try_split_damage_compound(text: &str, ctx: &mut ParseContext) -> Option<ParsedEffectClause> {
     let lower = text.to_lowercase();
     if !scan_contains_phrase(&lower, "and") {
@@ -5245,6 +5420,16 @@ fn try_split_damage_compound(text: &str, ctx: &mut ParseContext) -> Option<Parse
     // [with X | without X] and each player" (Pyrohemia / Earthquake / Hurricane
     // class). Must run before the general split so the player half isn't dropped.
     if let Some(clause) = try_parse_compound_object_player_damage(&lower) {
+        return Some(clause);
+    }
+
+    // CR 120.2b + CR 608.2c: Multi-target damage split — "deals N damage to T1,
+    // M damage to T2[, and K damage to T3]". A single source emits multiple
+    // DealDamage events with shared source-of-damage but distinct
+    // amount/target pairs (Cone of Flame, Banshee, Serpentine Spike). Must
+    // run before the general single-and split so the comma-separated chain
+    // isn't bisected by the "and" connector at the final segment.
+    if let Some(clause) = try_parse_multi_target_damage_chain(text, ctx) {
         return Some(clause);
     }
 
@@ -9006,7 +9191,14 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
                 }
                 SpecialClause::DieExileRider(rider_def) => {
                     if let Some(last_def) = defs.last_mut() {
-                        last_def.sub_ability = Some(rider_def.clone());
+                        // CR 614.1a + CR 608.2c: Append the rider as the
+                        // tail of the existing sub_ability chain instead of
+                        // overwriting it. Multi-target damage spells
+                        // (Serpentine Spike) populate the sub_ability chain
+                        // with continuation damage events; the rider must
+                        // attach AFTER the chain so all continuation events
+                        // resolve before the replacement attaches.
+                        append_to_deepest_sub_ability(last_def, Some(rider_def.clone()));
                     }
                     continue;
                 }
@@ -11308,6 +11500,15 @@ fn try_parse_damage_with_remainder<'a>(
         return None;
     };
 
+    // CR 107.1a: A trailing ", rounded up" / ", rounded down" qualifier sits
+    // BETWEEN the "damage" noun and the " to <target>" preposition (e.g.,
+    // Banshee — "deals half X damage, rounded down, to any target"). Consume
+    // it from `after_target` and propagate the typed RoundingMode onto the
+    // already-parsed DivideRounded amount. Necessary because `parse_count_expr`
+    // sees only "half X" before the literal "damage" tag fires; the rounding
+    // qualifier never reaches the inner combinator.
+    let (amount, after_target) = absorb_trailing_rounding_suffix(amount, after_target);
+
     let after_to = after_target
         .trim()
         .strip_prefix("to ")
@@ -11400,6 +11601,7 @@ fn try_parse_damage_with_remainder<'a>(
 
     let (target, rem) = parse_target_with_ctx(after_to, ctx);
     let (target, rem) = refine_damage_target_remainder(target, rem);
+    let rem = trim_dangling_target_word(rem);
     Some((
         Effect::DealDamage {
             amount,
@@ -11408,6 +11610,82 @@ fn try_parse_damage_with_remainder<'a>(
         },
         rem,
     ))
+}
+
+/// CR 115.1: `parse_target_with_ctx` consumes "another " but leaves the bare
+/// noun "target" in the remainder when no type word follows ("another target,"
+/// — Cone of Flame's continuation segments). The trailing word is structural
+/// punctuation between the target phrase and the next clause boundary; strip
+/// it so downstream chain detection lines up the comma boundary cleanly.
+fn trim_dangling_target_word(rem: &str) -> &str {
+    let trimmed = rem.trim_start_matches([' ']);
+    let lower = trimmed.to_lowercase();
+    if let Ok((rest_lower, _)) = tag::<_, _, OracleError<'_>>("target").parse(lower.as_str()) {
+        // Boundary check: the "target" must be a complete word (followed by
+        // EOF, comma, period, or whitespace). Otherwise we'd corrupt phrases
+        // like "targeted" / "targets" that legitimately start the remainder.
+        if rest_lower.is_empty()
+            || rest_lower.starts_with([',', '.'])
+            || rest_lower.starts_with(char::is_whitespace)
+        {
+            return &trimmed["target".len()..];
+        }
+    }
+    rem
+}
+
+/// CR 107.1a: A `, rounded up` / `, rounded down` qualifier may appear
+/// AFTER the "damage" noun and BEFORE the recipient phrase (Banshee,
+/// Spinal Embrace class). When present, propagate the typed
+/// [`RoundingMode`] onto a `DivideRounded` amount and consume the suffix
+/// from the post-amount remainder so downstream classification ("to <target>")
+/// sees a clean string.
+///
+/// Returns the (possibly updated) amount and the post-suffix remainder.
+/// Non-fractional amounts are returned untouched — the suffix only attaches to
+/// `DivideRounded` shapes per CR 107.1a; if it appears against a fixed amount
+/// it would be malformed Oracle text and we leave it for the recipient parser
+/// to surface as `IgnoredRemainder`.
+fn absorb_trailing_rounding_suffix(
+    amount: QuantityExpr,
+    after_target: &str,
+) -> (QuantityExpr, &str) {
+    let trimmed = after_target.trim_start();
+    let trimmed_lower = trimmed.to_lowercase();
+    let parsed = alt((
+        value(
+            RoundingMode::Up,
+            tag::<_, _, OracleError<'_>>(", rounded up"),
+        ),
+        value(RoundingMode::Down, tag(", rounded down")),
+        value(RoundingMode::Up, tag(", round up")),
+        value(RoundingMode::Down, tag(", round down")),
+    ))
+    .parse(trimmed_lower.as_str());
+    let Ok((rest_lower, rounding)) = parsed else {
+        return (amount, after_target);
+    };
+    let consumed = trimmed_lower.len() - rest_lower.len();
+    // After consuming the rounding suffix, any immediately following ", " is
+    // the boundary delimiter between the rounding qualifier and the
+    // recipient phrase ("damage, rounded down, to any target"). Strip it so
+    // the downstream "to <target>" classifier sees a clean prefix instead of
+    // ", to any target". The comma + space is structural punctuation, not
+    // dispatch — the dispatch already happened above.
+    let rest = trimmed[consumed..].trim_start_matches(',').trim_start();
+    let amount = match amount {
+        QuantityExpr::DivideRounded {
+            inner,
+            divisor,
+            rounding: _,
+        } => QuantityExpr::DivideRounded {
+            inner,
+            divisor,
+            rounding,
+        },
+        other => other,
+    };
+    (amount, rest)
 }
 
 fn try_parse_pump(lower: &str, text: &str) -> Option<Effect> {
@@ -13361,6 +13639,120 @@ mod tests {
             "sub_ability should be GainLife(3), got: {:?}",
             sub.effect
         );
+    }
+
+    /// CR 120.2b + CR 608.2c: Cone of Flame class — three damage events with
+    /// distinct amounts and ordinally-distinct targets, comma-separated with
+    /// `and` introducing the final segment. The chain is lowered as a
+    /// `DealDamage` whose `sub_ability` chain carries the continuation events.
+    #[test]
+    fn try_split_damage_compound_cone_of_flame_three_targets() {
+        let mut ctx = ParseContext::default();
+        let clause = try_split_damage_compound(
+            "~ deals 1 damage to any target, 2 damage to another target, and 3 damage to a third target",
+            &mut ctx,
+        );
+        let clause = clause.expect("should split into a multi-target damage chain");
+        assert!(
+            matches!(
+                clause.effect,
+                Effect::DealDamage {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Any,
+                    ..
+                }
+            ),
+            "primary effect should be DealDamage(1, Any), got: {:?}",
+            clause.effect
+        );
+        let sub = clause
+            .sub_ability
+            .as_ref()
+            .expect("expected sub_ability for second damage event");
+        match &*sub.effect {
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::Typed(typed),
+                ..
+            } => {
+                assert!(
+                    typed.properties.contains(&FilterProp::Another),
+                    "second target should carry Another property, got {:?}",
+                    typed.properties
+                );
+            }
+            other => panic!(
+                "second damage event should be DealDamage(2, Another), got: {:?}",
+                other
+            ),
+        }
+        let sub_sub = sub
+            .sub_ability
+            .as_ref()
+            .expect("expected sub_ability for third damage event");
+        assert!(
+            matches!(
+                *sub_sub.effect,
+                Effect::DealDamage {
+                    amount: QuantityExpr::Fixed { value: 3 },
+                    target: TargetFilter::Any,
+                    ..
+                }
+            ),
+            "third damage event should be DealDamage(3, Any), got: {:?}",
+            sub_sub.effect
+        );
+    }
+
+    /// CR 107.1a + CR 120.2b + CR 608.2c: Banshee class — fractional amount with
+    /// rounding qualifiers between "damage" and the recipient, plus a
+    /// multi-target split. `, rounded down/up` is consumed by
+    /// `absorb_trailing_rounding_suffix` and propagated onto the
+    /// `DivideRounded` amount so each segment carries the correct rounding.
+    #[test]
+    fn try_split_damage_compound_banshee_fractional_split() {
+        let mut ctx = ParseContext::default();
+        let clause = try_split_damage_compound(
+            "~ deals half X damage, rounded down, to any target, and half X damage, rounded up, to you",
+            &mut ctx,
+        );
+        let clause = clause.expect("should split fractional multi-target damage");
+        match &clause.effect {
+            Effect::DealDamage {
+                amount:
+                    QuantityExpr::DivideRounded {
+                        divisor: 2,
+                        rounding: RoundingMode::Down,
+                        ..
+                    },
+                target: TargetFilter::Any,
+                ..
+            } => {}
+            other => panic!(
+                "primary should be half X (rounded Down) to Any, got: {:?}",
+                other
+            ),
+        }
+        let sub = clause
+            .sub_ability
+            .as_ref()
+            .expect("expected sub_ability for second damage event");
+        match &*sub.effect {
+            Effect::DealDamage {
+                amount:
+                    QuantityExpr::DivideRounded {
+                        divisor: 2,
+                        rounding: RoundingMode::Up,
+                        ..
+                    },
+                target: TargetFilter::Controller,
+                ..
+            } => {}
+            other => panic!(
+                "second damage event should be half X (rounded Up) to Controller, got: {:?}",
+                other
+            ),
+        }
     }
 
     #[test]
@@ -17718,6 +18110,76 @@ mod tests {
             "override should be 4 damage to parent target, got {:?}",
             sub.effect
         );
+    }
+
+    /// CR 117.1 + CR 400.7j + CR 608.2k + CR 614.1a: Surtland Flinger class —
+    /// the "sacrifice another creature" cost-paid object is checked against a
+    /// noun-plus-subtype predicate ("a Giant"). The condition is
+    /// `CostPaidObjectMatchesFilter { Typed { type_filters = [Creature,
+    /// Subtype("Giant")] } }` wrapped in `ConditionInstead`, and the override
+    /// damage uses `EventContextAmount × 2` for "twice that much".
+    #[test]
+    fn instead_condition_recognizes_sacrificed_creature_was_a_subtype() {
+        let ability = parse_effect_chain(
+            "~ deals damage equal to the sacrificed creature's power to any target. If the sacrificed creature was a Giant, ~ deals twice that much damage instead.",
+            AbilityKind::Spell,
+        );
+        let sub = ability
+            .sub_ability
+            .as_ref()
+            .expect("expected instead sub_ability");
+        let cond = sub
+            .condition
+            .as_ref()
+            .expect("instead sub_ability must carry a condition");
+        let AbilityCondition::ConditionInstead { inner } = cond else {
+            panic!("expected ConditionInstead, got {cond:?}");
+        };
+        let AbilityCondition::CostPaidObjectMatchesFilter { filter } = inner.as_ref() else {
+            panic!("expected CostPaidObjectMatchesFilter, got {inner:?}");
+        };
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(
+            typed.type_filters.contains(&TypeFilter::Creature),
+            "type_filters must include Creature noun, got {:?}",
+            typed.type_filters
+        );
+        assert!(
+            typed.type_filters.iter().any(|tf| matches!(
+                tf,
+                TypeFilter::Subtype(s) if s == "Giant"
+            )),
+            "type_filters must include Subtype(Giant) predicate, got {:?}",
+            typed.type_filters
+        );
+        match &*sub.effect {
+            Effect::DealDamage {
+                amount:
+                    QuantityExpr::Multiply {
+                        factor: 2,
+                        inner: amt_inner,
+                    },
+                target: TargetFilter::ParentTarget,
+                ..
+            } => {
+                assert!(
+                    matches!(
+                        amt_inner.as_ref(),
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::EventContextAmount,
+                        }
+                    ),
+                    "override amount must be Multiply{{2, EventContextAmount}}, got {:?}",
+                    amt_inner
+                );
+            }
+            other => panic!(
+                "override should be 2× EventContextAmount damage to parent target, got {:?}",
+                other
+            ),
+        }
     }
 
     /// Regression guard: pre-existing "it's <color>" anaphoric form must
