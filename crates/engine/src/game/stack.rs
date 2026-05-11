@@ -51,10 +51,21 @@ fn restore_alternative_spell_normal_face(state: &mut GameState, object_id: Objec
 /// still on the Stack at the end of resolution receive the post-resolution
 /// default destination.
 fn spell_still_on_stack(state: &GameState, id: ObjectId) -> bool {
-    state
-        .objects
-        .get(&id)
-        .is_some_and(|obj| obj.zone == Zone::Stack)
+    spell_in_zone(state, id, Zone::Stack)
+}
+
+fn spell_in_zone(state: &GameState, id: ObjectId, zone: Zone) -> bool {
+    state.objects.get(&id).is_some_and(|obj| obj.zone == zone)
+}
+
+fn move_prevented_permanent_spell_to_graveyard_if_still_on_stack(
+    state: &mut GameState,
+    id: ObjectId,
+    events: &mut Vec<GameEvent>,
+) {
+    if spell_still_on_stack(state, id) {
+        zones::move_to_zone(state, id, Zone::Graveyard, events);
+    }
 }
 
 /// CR 608.2: Resolve the top object on the stack.
@@ -449,29 +460,31 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                     // can evaluate conditions like "if you cast it from your hand".
                     // When ability is present, use its context; otherwise the object
                     // already has cast_from_zone set during finalize_cast_to_stack.
-                    if let Some(obj) = state.objects.get_mut(&entry.id) {
-                        if let Some(ref ability) = ability {
-                            obj.cast_from_zone = ability.context.cast_from_zone;
-                            // CR 702.33d + CR 702.33f: Propagate kicker payments
-                            // from the resolving spell's `SpellContext` to the
-                            // resulting permanent so post-resolution gates
-                            // (`ReplacementCondition::CastViaKicker` and ETB
-                            // `AbilityCondition::AdditionalCostPaid` on triggered
-                            // abilities) can evaluate.
-                            obj.kickers_paid.clone_from(&ability.context.kickers_paid);
+                    if spell_in_zone(state, entry.id, Zone::Battlefield) {
+                        if let Some(obj) = state.objects.get_mut(&entry.id) {
+                            if let Some(ref ability) = ability {
+                                obj.cast_from_zone = ability.context.cast_from_zone;
+                                // CR 702.33d + CR 702.33f: Propagate kicker payments
+                                // from the resolving spell's `SpellContext` to the
+                                // resulting permanent so post-resolution gates
+                                // (`ReplacementCondition::CastViaKicker` and ETB
+                                // `AbilityCondition::AdditionalCostPaid` on triggered
+                                // abilities) can evaluate.
+                                obj.kickers_paid.clone_from(&ability.context.kickers_paid);
+                            }
+                            if let Some(permission) = cast_timing_permission {
+                                obj.cast_timing_permission = Some((permission, state.turn_number));
+                            }
+                            obj.convoked_creatures = convoked_creatures;
                         }
-                        if let Some(permission) = cast_timing_permission {
-                            obj.cast_timing_permission = Some((permission, state.turn_number));
-                        }
-                        obj.convoked_creatures = convoked_creatures;
+                        super::room::unlock_door_designation(
+                            state,
+                            entry.id,
+                            entry.controller,
+                            crate::game::game_object::RoomDoor::Left,
+                            events,
+                        );
                     }
-                    super::room::unlock_door_designation(
-                        state,
-                        entry.id,
-                        entry.controller,
-                        crate::game::game_object::RoomDoor::Left,
-                        events,
-                    );
                     // CR 614.12a: Drain mandatory replacement post-effects (e.g., the
                     // Siege protector / Tribute opponent-choice prompt that was stashed
                     // by `apply_single_replacement` while resolving this ZoneChange).
@@ -497,9 +510,9 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                     // resolved), skip the prevented-ETB graveyard fallback so
                     // the self-chosen destination is honored (issue #323
                     // class).
-                    if spell_still_on_stack(state, entry.id) {
-                        zones::move_to_zone(state, entry.id, Zone::Graveyard, events);
-                    }
+                    move_prevented_permanent_spell_to_graveyard_if_still_on_stack(
+                        state, entry.id, events,
+                    );
                 }
                 super::replacement::ReplacementResult::NeedsChoice(player) => {
                     // A replacement needs player choice (e.g., Clone "enter as a copy").
@@ -579,7 +592,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
         }
 
         // CR 303.4f: Aura resolving to battlefield attaches to its target.
-        if dest == Zone::Battlefield {
+        if spell_in_zone(state, entry.id, Zone::Battlefield) {
             let is_aura = state
                 .objects
                 .get(&entry.id)
@@ -2339,6 +2352,53 @@ mod tests {
         spell_id
     }
 
+    fn push_self_exiling_aura_spell(state: &mut GameState, target_id: ObjectId) -> ObjectId {
+        let spell_id = create_object(
+            state,
+            CardId(901),
+            PlayerId(0),
+            "Test Self-Exiling Aura".to_string(),
+            Zone::Stack,
+        );
+        {
+            let obj = state.objects.get_mut(&spell_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.card_types.subtypes.push("Aura".to_string());
+        }
+
+        let resolved = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: None,
+                destination: Zone::Exile,
+                target: TargetFilter::SelfRef,
+                owner_library: false,
+                enter_transformed: false,
+                under_your_control: false,
+                enter_tapped: false,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+            },
+            vec![TargetRef::Object(target_id)],
+            spell_id,
+            PlayerId(0),
+        );
+
+        state.stack.push_back(StackEntry {
+            id: spell_id,
+            source_id: spell_id,
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(901),
+                ability: Some(resolved),
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+
+        spell_id
+    }
+
     /// CR 608.3 + CR 608.2c (architectural cleanup, deferred from #323): a
     /// permanent spell whose `execute_effect` self-exiles must NOT be moved to
     /// the battlefield by the post-resolution Stack→Battlefield default. The
@@ -2376,47 +2436,70 @@ mod tests {
         );
     }
 
-    /// CR 608.3e (architectural cleanup, deferred from #323): a permanent
-    /// spell whose ETB is fully prevented and whose `execute_effect` already
-    /// self-exiled must NOT be moved to the graveyard by the prevented-ETB
-    /// fallback. Same Stack-residency guard, same single authority.
-    ///
-    /// We synthesize the prevention condition by removing the spell from the
-    /// stack object index BEFORE calling `resolve_top` would emit the ETB
-    /// replacement — but the canonical exercise is via the post-resolution
-    /// path: a self-exiling permanent's resolution moves the card off the
-    /// Stack, so even if a hypothetical ETB-prevention branch fired, the
-    /// guard would skip the graveyard fallback.
-    ///
-    /// This test pins the guard's presence at the prevented-ETB site by
-    /// constructing the same self-exiling permanent and asserting that no
-    /// matter which post-resolution branch the engine takes (battlefield-move,
-    /// prevented-ETB graveyard-move, or 608.2n graveyard-move), the
-    /// self-chosen Exile destination wins. The architectural contract: the
-    /// Stack-residency guard applies symmetrically to ALL three default-move
-    /// sites in `stack.rs::resolve_top`.
     #[test]
-    fn permanent_spell_self_exile_skips_prevented_etb_default() {
+    fn self_moved_aura_spell_does_not_receive_battlefield_attachment_side_effects() {
         let mut state = setup();
-        let spell_id = push_self_exiling_permanent_spell(&mut state);
+        let target_id = create_object(
+            &mut state,
+            CardId(902),
+            PlayerId(0),
+            "Target Creature".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&target_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+        }
+        let aura_id = push_self_exiling_aura_spell(&mut state, target_id);
 
         let mut events = Vec::new();
         resolve_top(&mut state, &mut events);
 
-        // Whichever post-resolution branch executed, the self-exile must win:
-        // never end in graveyard (608.3e prevented-ETB fallback was skipped),
-        // never end in battlefield (608.3 default was skipped).
-        assert_ne!(
-            state.objects[&spell_id].zone,
-            Zone::Graveyard,
-            "self-exiled permanent must NOT end up in graveyard via the \
-             prevented-ETB fallback (CR 608.3e Stack-residency guard)"
+        assert_eq!(state.objects[&aura_id].zone, Zone::Exile);
+        assert!(
+            state.objects[&aura_id].attached_to.is_none(),
+            "Aura post-resolution attachment must only run after actual battlefield entry"
         );
-        assert_ne!(
-            state.objects[&spell_id].zone,
-            Zone::Battlefield,
-            "self-exiled permanent must NOT end up on battlefield via the \
-             post-replacement Execute branch (CR 608.3 Stack-residency guard)"
+        assert!(
+            !state.objects[&target_id].attachments.contains(&aura_id),
+            "target must not point at an Aura that self-exiled during resolution"
+        );
+    }
+
+    /// CR 608.3e: a permanent spell whose ETB is fully prevented goes to its
+    /// owner's graveyard only if it is still on the stack when that fallback is
+    /// reached.
+    #[test]
+    fn prevented_etb_default_only_moves_spell_still_on_stack() {
+        let mut state = setup();
+        let spell_id = create_object(
+            &mut state,
+            CardId(903),
+            PlayerId(0),
+            "Test Prevented Creature".to_string(),
+            Zone::Stack,
+        );
+        state
+            .objects
+            .get_mut(&spell_id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        let mut events = Vec::new();
+
+        move_prevented_permanent_spell_to_graveyard_if_still_on_stack(
+            &mut state,
+            spell_id,
+            &mut events,
+        );
+        assert_eq!(state.objects[&spell_id].zone, Zone::Graveyard);
+
+        zones::move_to_zone(&mut state, spell_id, Zone::Exile, &mut events);
+        move_prevented_permanent_spell_to_graveyard_if_still_on_stack(
+            &mut state,
+            spell_id,
+            &mut events,
         );
         assert_eq!(state.objects[&spell_id].zone, Zone::Exile);
     }
