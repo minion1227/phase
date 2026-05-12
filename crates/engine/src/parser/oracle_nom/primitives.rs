@@ -170,11 +170,7 @@ fn parse_mana_symbol_inner(input: &str) -> OracleResult<'_, ManaCostShard> {
         value(ManaCostShard::GreenWhite, tag("G/W")),
         value(ManaCostShard::GreenBlue, tag("G/U")),
         value(ManaCostShard::PhyrexianGreen, tag("G/P")),
-        value(ManaCostShard::TwoWhite, tag("2/W")),
-        value(ManaCostShard::TwoBlue, tag("2/U")),
-        value(ManaCostShard::TwoBlack, tag("2/B")),
-        value(ManaCostShard::TwoRed, tag("2/R")),
-        value(ManaCostShard::TwoGreen, tag("2/G")),
+        parse_two_generic_hybrid_symbol_inner,
         // Basic colored and special
         value(ManaCostShard::White, tag("W")),
     ))
@@ -227,12 +223,23 @@ fn parse_mana_cost_element(input: &str) -> OracleResult<'_, ManaElement> {
 /// Parse inner mana cost element, properly distinguishing generic numbers from shards.
 fn parse_mana_cost_inner(input: &str) -> OracleResult<'_, ManaElement> {
     alt((
-        // Try generic number first (before shard parsing eats digits)
+        map(parse_two_generic_hybrid_symbol_inner, ManaElement::Shard),
         map(
             map_res(digit1, |s: &str| s.parse::<u32>()),
             ManaElement::Generic,
         ),
         map(parse_mana_symbol_inner, ManaElement::Shard),
+    ))
+    .parse(input)
+}
+
+fn parse_two_generic_hybrid_symbol_inner(input: &str) -> OracleResult<'_, ManaCostShard> {
+    alt((
+        value(ManaCostShard::TwoWhite, tag("2/W")),
+        value(ManaCostShard::TwoBlue, tag("2/U")),
+        value(ManaCostShard::TwoBlack, tag("2/B")),
+        value(ManaCostShard::TwoRed, tag("2/R")),
+        value(ManaCostShard::TwoGreen, tag("2/G")),
     ))
     .parse(input)
 }
@@ -1041,6 +1048,28 @@ mod tests {
             ManaCost::Cost { shards, generic } => {
                 assert_eq!(generic, 2);
                 assert_eq!(shards, vec![ManaCostShard::White, ManaCostShard::Blue]);
+            }
+            _ => panic!("expected Cost variant"),
+        }
+    }
+
+    #[test]
+    fn test_parse_mana_cost_two_generic_hybrid() {
+        let (rest, cost) = parse_mana_cost("{2/W}{2/U}{2/B}{2/R}{2/G}").unwrap();
+        assert_eq!(rest, "");
+        match cost {
+            ManaCost::Cost { shards, generic } => {
+                assert_eq!(generic, 0);
+                assert_eq!(
+                    shards,
+                    vec![
+                        ManaCostShard::TwoWhite,
+                        ManaCostShard::TwoBlue,
+                        ManaCostShard::TwoBlack,
+                        ManaCostShard::TwoRed,
+                        ManaCostShard::TwoGreen,
+                    ]
+                );
             }
             _ => panic!("expected Cost variant"),
         }

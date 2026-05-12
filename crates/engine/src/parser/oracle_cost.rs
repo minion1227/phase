@@ -389,7 +389,9 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
 
     // "Tap an untapped creature you control" / "Tap two untapped creatures you control"
     // / "Tap another untapped creature you control" / "Tap X untapped [type] you control"
-    if let Some(((), tap_rest)) = nom_on_lower(text, &lower, |i| value((), tag("tap ")).parse(i)) {
+    if let Some(((), tap_rest)) = nom_on_lower(text, &lower, |i| {
+        value((), alt((tag("tap "), tag("tapped ")))).parse(i)
+    }) {
         let tap_lower = tap_rest.to_lowercase();
         let (count, filter_text) = if let Some(((), r)) = nom_on_lower(tap_rest, &tap_lower, |i| {
             value(
@@ -897,6 +899,39 @@ mod tests {
     #[test]
     fn cost_untap() {
         assert_eq!(parse_oracle_cost("{Q}"), AbilityCost::Untap);
+    }
+
+    #[test]
+    fn cost_two_generic_hybrid_mana() {
+        assert_eq!(
+            parse_oracle_cost("{2/U}{2/B}{2/R}{2/G}"),
+            AbilityCost::Mana {
+                cost: ManaCost::Cost {
+                    generic: 0,
+                    shards: vec![
+                        ManaCostShard::TwoBlue,
+                        ManaCostShard::TwoBlack,
+                        ManaCostShard::TwoRed,
+                        ManaCostShard::TwoGreen,
+                    ],
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn cost_tapped_four_untapped_humans() {
+        assert_eq!(
+            parse_oracle_cost("Tapped four untapped Humans you control"),
+            AbilityCost::TapCreatures {
+                count: 4,
+                filter: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Subtype("Human".to_string())],
+                    controller: Some(ControllerRef::You),
+                    properties: Vec::new(),
+                }),
+            }
+        );
     }
 
     #[test]
