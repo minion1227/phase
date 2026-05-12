@@ -715,11 +715,27 @@ pub(super) fn exile_alt_cost_permission_supports_cast(
     }
 }
 
-pub(super) fn exile_alt_cost_permissions_accept_resulting_mv(
+fn exile_alt_cost_permission_uses_selected_mana_cost(
+    permission: &crate::types::ability::CastingPermission,
+    selected_mana_cost: &ManaCost,
+) -> bool {
+    match permission {
+        crate::types::ability::CastingPermission::ExileWithAltCost { cost, .. } => {
+            cost == selected_mana_cost
+        }
+        crate::types::ability::CastingPermission::ExileWithAltAbilityCost { .. } => {
+            *selected_mana_cost == ManaCost::zero()
+        }
+        _ => false,
+    }
+}
+
+pub(super) fn exile_alt_cost_permissions_accept_selected_cost_and_resulting_mv(
     state: &GameState,
     object_id: ObjectId,
     player: PlayerId,
     resulting_mv: u32,
+    selected_mana_cost: &ManaCost,
 ) -> bool {
     let Some(obj) = state.objects.get(&object_id) else {
         return true;
@@ -740,6 +756,9 @@ pub(super) fn exile_alt_cost_permissions_accept_resulting_mv(
                     player,
                     permission,
                     Some(resulting_mv),
+                ) && exile_alt_cost_permission_uses_selected_mana_cost(
+                    permission,
+                    selected_mana_cost,
                 ) {
                     return true;
                 }
