@@ -113,25 +113,26 @@ export const PermanentCard = memo(function PermanentCard({ objectId, attachments
   const transientContinuousEffects = useGameStore(
     (s) => s.gameState?.transient_continuous_effects,
   );
+  const objId = obj?.id;
   const keywordSourceMap = useMemo(
     () =>
-      obj
-        ? buildGrantedKeywordSources(objectAttribution, obj.id, {
+      objId !== undefined
+        ? buildGrantedKeywordSources(objectAttribution, objId, {
             objects: gameObjects,
             transientContinuousEffects,
           })
         : undefined,
-    [objectAttribution, transientContinuousEffects, gameObjects, obj?.id],
+    [objectAttribution, transientContinuousEffects, gameObjects, objId],
   );
   const ptSources = useMemo(
     () =>
-      obj
-        ? buildPTSources(objectAttribution, obj.id, {
+      objId !== undefined
+        ? buildPTSources(objectAttribution, objId, {
             objects: gameObjects,
             transientContinuousEffects,
           })
         : undefined,
-    [objectAttribution, transientContinuousEffects, gameObjects, obj?.id],
+    [objectAttribution, transientContinuousEffects, gameObjects, objId],
   );
   const {
     activatableObjectIds,
