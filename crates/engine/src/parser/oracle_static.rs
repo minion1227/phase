@@ -7489,25 +7489,47 @@ fn parse_quoted_rule_static_modifications(text: &str) -> Option<Vec<ContinuousMo
         return None;
     }
 
-    let modifications: Vec<_> = parse_static_line_multi(text)
+    // CR 113.3d + CR 604.1: A quoted static ability is granted to the recipient
+    // verbatim. If `parse_static_line_multi` produces nothing, the inner text
+    // isn't a recognized static — fall through to the spell-like `GrantAbility`
+    // path. Otherwise, emit one `ContinuousModification` per inner static:
+    //   - `affected == Some(SelfRef)` with no condition / no layered modifications
+    //     stays on the existing `AddStaticMode` path (the trivial recipient-anchored
+    //     case — e.g. "can't be blocked", "must attack each combat").
+    //   - Everything else (non-SelfRef scope, conditional, or carrying layered
+    //     P/T / keyword modifications — e.g. Dancer's Chakrams' inner clause
+    //     "Other commanders you control get +2/+2 and have lifelink") emits
+    //     `GrantStaticAbility` so the inner static's scope, condition, and
+    //     modifications are preserved verbatim on the recipient (CR 611.2c +
+    //     CR 613.1f).
+    //
+    // Trailing punctuation: the host clause leaves the inner text bookended
+    // by a list comma or period (e.g. `..., "Other commanders you control get
+    // +2/+2 and have lifelink," and is a Performer ...`). Strip it before
+    // delegating so the inner keyword-list parser doesn't choke on the comma.
+    let trimmed = text.trim().trim_end_matches([',', '.', ';']).trim();
+    let defs = parse_static_line_multi(trimmed);
+    if defs.is_empty() {
+        return None;
+    }
+    let modifications: Vec<_> = defs
         .into_iter()
         .map(|definition| {
-            if definition.affected != Some(TargetFilter::SelfRef)
-                || definition.condition.is_some()
-                || !definition.modifications.is_empty()
+            if definition.affected == Some(TargetFilter::SelfRef)
+                && definition.condition.is_none()
+                && definition.modifications.is_empty()
             {
-                return None;
+                ContinuousModification::AddStaticMode {
+                    mode: definition.mode,
+                }
+            } else {
+                ContinuousModification::GrantStaticAbility {
+                    definition: Box::new(definition),
+                }
             }
-            Some(ContinuousModification::AddStaticMode {
-                mode: definition.mode,
-            })
         })
-        .collect::<Option<_>>()?;
-    if modifications.is_empty() {
-        None
-    } else {
-        Some(modifications)
-    }
+        .collect();
+    Some(modifications)
 }
 
 /// Parse a single quoted ability string into a typed AbilityDefinition.
@@ -11544,6 +11566,65 @@ mod tests {
             vec![ContinuousModification::AddStaticMode {
                 mode: StaticMode::MustAttack,
             }]
+        );
+    }
+
+    /// CR 113.3d + CR 604.1: A quoted continuous static whose inner scope is
+    /// not `SelfRef` (e.g. Dancer's Chakrams' "Other commanders you control
+    /// get +2/+2 and have lifelink") must emit `GrantStaticAbility` carrying
+    /// the inner `StaticDefinition` verbatim — NOT a fallback `GrantAbility`
+    /// wrapping a `Pump` effect, and NOT an `AddStaticMode` with a discarded
+    /// scope.
+    #[test]
+    fn quoted_non_selfref_static_grants_full_static_definition() {
+        // Trailing comma mirrors how the host clause splits the quoted text.
+        let modifications = parse_quoted_ability_modifications(
+            "\"Other commanders you control get +2/+2 and have lifelink,\"",
+        );
+        assert_eq!(modifications.len(), 1, "expected one granted static");
+        let definition = match &modifications[0] {
+            ContinuousModification::GrantStaticAbility { definition } => definition.as_ref(),
+            other => panic!("expected GrantStaticAbility, got {:?}", other),
+        };
+        assert_eq!(definition.mode, StaticMode::Continuous);
+        // The recipient's controller, not SelfRef.
+        match &definition.affected {
+            Some(TargetFilter::Typed(t)) => {
+                assert!(
+                    t.properties.contains(&FilterProp::IsCommander),
+                    "filter must require IsCommander"
+                );
+                assert!(
+                    t.properties.contains(&FilterProp::Another),
+                    "filter must exclude the recipient via Another"
+                );
+                assert_eq!(t.controller, Some(ControllerRef::You));
+            }
+            other => panic!("expected Typed filter, got {:?}", other),
+        }
+        // Inner modifications: +2/+2 and lifelink (no spurious Pump or Unimplemented).
+        assert!(
+            definition
+                .modifications
+                .contains(&ContinuousModification::AddPower { value: 2 }),
+            "missing AddPower +2 in {:?}",
+            definition.modifications,
+        );
+        assert!(
+            definition
+                .modifications
+                .contains(&ContinuousModification::AddToughness { value: 2 }),
+            "missing AddToughness +2 in {:?}",
+            definition.modifications,
+        );
+        assert!(
+            definition
+                .modifications
+                .contains(&ContinuousModification::AddKeyword {
+                    keyword: Keyword::Lifelink
+                }),
+            "missing AddKeyword(Lifelink) in {:?}",
+            definition.modifications,
         );
     }
 
@@ -18151,9 +18232,17 @@ mod tests {
                 keyword: Keyword::Menace
             }
         )));
+        // CR 113.3d + CR 604.1: The inner quoted clause is a `SelfRef`
+        // continuous static carrying layered modifications (AddDynamicPower
+        // for "+X/+0 where X is..."). Since the new `GrantStaticAbility`
+        // primitive landed, this path emits a granted static instead of
+        // a generic `GrantAbility` wrapper — the granted static then
+        // applies its dynamic P/T mod through the layer system on the
+        // recipient. Either is acceptable structurally; assert on the
+        // typed primitive that's now produced.
         assert!(def.modifications.iter().any(|modification| matches!(
             modification,
-            ContinuousModification::GrantAbility { .. }
+            ContinuousModification::GrantStaticAbility { .. }
         )));
     }
 

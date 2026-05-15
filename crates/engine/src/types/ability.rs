@@ -9032,6 +9032,20 @@ pub enum ContinuousModification {
     AddStaticMode {
         mode: StaticMode,
     },
+    /// CR 113.3d + CR 604.1 + CR 613.1f: Grant a full static ability to the
+    /// affected object — used for quoted continuous statics whose own
+    /// `affected`/`condition`/`modifications` are independent of the recipient
+    /// (e.g. "...and \"Other commanders you control get +2/+2 and have
+    /// lifelink\""). The recipient receives the granted static as if it were
+    /// printed on it (CR 604.1); the granted static then operates per CR 611.2c
+    /// (continuous effect from a static — set of affected objects is
+    /// re-evaluated continuously). Unlike `AddStaticMode` (which manufactures a
+    /// `SelfRef` static against the recipient), this variant carries the inner
+    /// `StaticDefinition` verbatim so the inner scope, condition, and layered
+    /// modifications are all preserved. Applied at layer 6 (CR 613.1f).
+    GrantStaticAbility {
+        definition: Box<StaticDefinition>,
+    },
     /// CR 613.4d: Switch power and toughness. Applied in layer 7d.
     SwitchPowerToughness,
     /// CR 510.1c: This creature assigns combat damage equal to its toughness

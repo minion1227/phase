@@ -91,7 +91,8 @@ impl ContinuousModification {
             | ContinuousModification::GrantAbility { .. }
             | ContinuousModification::GrantTrigger { .. }
             | ContinuousModification::RemoveAllAbilities
-            | ContinuousModification::AddStaticMode { .. } => Layer::Ability,
+            | ContinuousModification::AddStaticMode { .. }
+            | ContinuousModification::GrantStaticAbility { .. } => Layer::Ability,
             ContinuousModification::AddType { .. }
             | ContinuousModification::RemoveType { .. }
             | ContinuousModification::AddSubtype { .. }

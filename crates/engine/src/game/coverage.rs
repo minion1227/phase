@@ -2218,6 +2218,7 @@ fn fmt_modification(m: &crate::types::ability::ContinuousModification) -> String
             format!("add color {}", fmt_mana_color_full(color))
         }
         ContinuousModification::AddStaticMode { mode } => format!("{mode}"),
+        ContinuousModification::GrantStaticAbility { .. } => "grant static ability".into(),
         ContinuousModification::SwitchPowerToughness => "switch P/T".into(),
         ContinuousModification::AssignDamageFromToughness => "damage from toughness".into(),
         ContinuousModification::AssignDamageAsThoughUnblocked => {
