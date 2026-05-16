@@ -2477,25 +2477,17 @@ pub fn find_applicable_replacements(
                     | ProposedEvent::Mill { player_id, .. } = event
                     {
                         let player_ok = match &repl_def.valid_player {
-                            Some(crate::types::ability::ControllerRef::Opponent) => {
+                            // CR 614.1a: opponent-scoped replacement (Tainted Remedy).
+                            Some(crate::types::ability::ReplacementPlayerScope::Opponent) => {
                                 *player_id != obj.controller
                             }
-                            Some(crate::types::ability::ControllerRef::You) => {
+                            // Explicit controller scope.
+                            Some(crate::types::ability::ReplacementPlayerScope::You) => {
                                 *player_id == obj.controller
                             }
-                            // CR 109.4: Target-player scope has no meaning at
-                            // replacement-application time. Fail closed.
-                            Some(crate::types::ability::ControllerRef::ScopedPlayer) => false,
-                            Some(crate::types::ability::ControllerRef::TargetPlayer) => false,
-                            Some(crate::types::ability::ControllerRef::ParentTargetController) => {
-                                false
-                            }
-                            Some(crate::types::ability::ControllerRef::DefendingPlayer) => false,
-                            // CR 109.4: Chosen-player scope has no meaning at
-                            // replacement-application time.
-                            Some(crate::types::ability::ControllerRef::ChosenPlayer { .. }) => {
-                                false
-                            }
+                            // CR 614.1a: all-players replacement (Rain of Gore) —
+                            // applies regardless of who controls the source.
+                            Some(crate::types::ability::ReplacementPlayerScope::AnyPlayer) => true,
                             None => {
                                 // Default: controller-only (backward compatible)
                                 *player_id == obj.controller
@@ -3394,8 +3386,8 @@ mod tests {
     use crate::game::effects::token::apply_create_token_after_replacement;
     use crate::game::game_object::{AttachTarget, GameObject};
     use crate::types::ability::{
-        AbilityCost, AbilityDefinition, AbilityKind, ControllerRef, Effect, GainLifePlayer,
-        QuantityExpr, ReplacementDefinition, TargetFilter, TargetRef,
+        AbilityCost, AbilityDefinition, AbilityKind, Effect, GainLifePlayer, QuantityExpr,
+        ReplacementDefinition, ReplacementPlayerScope, TargetFilter, TargetRef,
     };
     use crate::types::game_state::DamageRecord;
     use crate::types::identifiers::{CardId, ObjectId};
@@ -3911,7 +3903,7 @@ mod tests {
                     destination: Zone::Graveyard,
                 },
             ));
-        repl.valid_player = Some(ControllerRef::Opponent);
+        repl.valid_player = Some(ReplacementPlayerScope::Opponent);
         let state = test_state_with_object(ObjectId(10), Zone::Battlefield, vec![repl]);
         let registry = build_replacement_registry();
 
@@ -3932,6 +3924,49 @@ mod tests {
         assert_eq!(
             find_applicable_replacements(&state, &opponent_event, &registry).len(),
             1
+        );
+    }
+
+    /// CR 614.1a: a `valid_player: Some(AnyPlayer)` replacement (Rain of Gore)
+    /// applies to EVERY player's event — both the source controller's and a
+    /// non-controller's. The non-controller case is the bug all-players scope
+    /// fixes (the controller-only default would have skipped it).
+    #[test]
+    fn any_player_gain_life_replacement_applies_to_every_player() {
+        let mut repl =
+            ReplacementDefinition::new(ReplacementEvent::GainLife).execute(AbilityDefinition::new(
+                crate::types::ability::AbilityKind::Spell,
+                Effect::LoseLife {
+                    amount: QuantityExpr::Ref {
+                        qty: crate::types::ability::QuantityRef::EventContextAmount,
+                    },
+                    target: Some(TargetFilter::Controller),
+                },
+            ));
+        repl.valid_player = Some(ReplacementPlayerScope::AnyPlayer);
+        let state = test_state_with_object(ObjectId(10), Zone::Battlefield, vec![repl]);
+        let registry = build_replacement_registry();
+
+        let controller_event = ProposedEvent::LifeGain {
+            player_id: PlayerId(0),
+            amount: 3,
+            applied: HashSet::new(),
+        };
+        let opponent_event = ProposedEvent::LifeGain {
+            player_id: PlayerId(1),
+            amount: 3,
+            applied: HashSet::new(),
+        };
+
+        assert_eq!(
+            find_applicable_replacements(&state, &controller_event, &registry).len(),
+            1,
+            "AnyPlayer scope must apply to the source controller"
+        );
+        assert_eq!(
+            find_applicable_replacements(&state, &opponent_event, &registry).len(),
+            1,
+            "AnyPlayer scope must also apply to a non-controller (the fixed bug)"
         );
     }
 

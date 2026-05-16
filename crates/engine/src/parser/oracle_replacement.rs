@@ -29,7 +29,8 @@ use crate::types::ability::{
     ContinuousModification, ControllerRef, CopyManaValueLimit, DamageModification,
     DamageTargetFilter, DamageTargetPlayerScope, Duration, Effect, FilterProp, ManaModification,
     ManaReplacementScope, PreventionAmount, QuantityExpr, QuantityRef, ReplacementCondition,
-    ReplacementDefinition, ReplacementMode, StaticCondition, TargetFilter, TypeFilter, TypedFilter,
+    ReplacementDefinition, ReplacementMode, ReplacementPlayerScope, StaticCondition, TargetFilter,
+    TypeFilter, TypedFilter,
 };
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::mana::{ManaColor, ManaCost, ManaType};
@@ -241,30 +242,46 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
     }
 
     // --- "If [player] would gain life, {effect}" ---
-    // CR 614.1a: Widened from "you would gain life" to handle opponent/player scope.
-    if nom_primitives::scan_contains(&lower, "would gain life") {
+    // CR 614.1a: Widened from "you would gain life" to handle opponent/player
+    // scope. The entry gate is a nom `alt` over the two life-gain phrasings:
+    // the direct "would gain life" and the periphrastic "would cause its
+    // controller to gain life" (Rain of Gore), which has no contiguous "would
+    // gain life" substring and would otherwise skip this branch entirely.
+    let mentions_gain_life = nom_primitives::scan_at_word_boundaries(&lower, |i| {
+        value(
+            (),
+            alt((
+                tag::<_, _, OracleError<'_>>("would gain life"),
+                tag("would cause its controller to gain life"),
+            )),
+        )
+        .parse(i)
+    })
+    .is_some();
+    if mentions_gain_life {
         let effect_text = extract_replacement_effect(&normalized);
         let mut def =
             ReplacementDefinition::new(ReplacementEvent::GainLife).description(text.to_string());
         if let Some(e) = effect_text {
             def = def.execute(parse_effect_chain(&e, AbilityKind::Spell));
         }
-        // Parse the subject to determine player scope
+        // CR 614.1a: Parse the subject to determine player scope.
         if nom_primitives::scan_contains(&lower, "an opponent would gain life")
             || nom_primitives::scan_contains(&lower, "opponent would gain life")
         {
-            def.valid_player = Some(ControllerRef::Opponent);
-        } else if nom_primitives::scan_contains(&lower, "a player would gain life") {
-            // "a player" applies to all players — None means controller-only,
-            // so we need a way to express "all". Use a sentinel: leave valid_player
-            // as None and let the matcher check. Actually, for "a player", the
-            // replacement applies regardless of who gains life. The matcher needs
-            // to be updated to not filter on controller when valid_player is None
-            // and the subject was "a player". For now, set valid_player to None
-            // and document that the matcher should not restrict player scope.
-            // NOTE: The existing matcher restricts to controller only. For Tainted Remedy
-            // ("an opponent"), we set Opponent. For "you", we leave None (controller-only).
+            def.valid_player = Some(ReplacementPlayerScope::Opponent);
+        } else if nom_primitives::scan_contains(&lower, "would cause its controller to gain life")
+            || nom_primitives::scan_contains(&lower, "a player would gain life")
+        {
+            // CR 614.1a: "a spell or ability would cause its controller to gain
+            // life" (Rain of Gore) and "a player would gain life" are global —
+            // the replacement watches every player's life gain, not just the
+            // source controller's. Step 4 note: the "caused by a spell or
+            // ability" qualifier is effectively universal (even combat lifelink
+            // is ability-sourced), so no `ReplacementCondition` is needed.
+            def.valid_player = Some(ReplacementPlayerScope::AnyPlayer);
         }
+        // else: "you would gain life" → valid_player stays None (controller-only).
         // CR 614.12 + CR 614.1a: A "while [condition]" gate in the antecedent
         // suppresses the replacement when the condition is false. Phial of
         // Galadriel ("If you would gain life while you have 5 or less life,
@@ -3009,7 +3026,7 @@ fn parse_mill_count_replacement(lower: &str, original_text: &str) -> Option<Repl
         .description(original_text.to_string());
 
     if matches!(subject, MillReplacementSubject::Opponent) {
-        def.valid_player = Some(ControllerRef::Opponent);
+        def.valid_player = Some(ReplacementPlayerScope::Opponent);
     }
 
     Some(def)
@@ -8271,7 +8288,7 @@ mod tests {
             .expect("must parse mill replacement");
 
         assert_eq!(def.event, ReplacementEvent::Mill);
-        assert_eq!(def.valid_player, Some(ControllerRef::Opponent));
+        assert_eq!(def.valid_player, Some(ReplacementPlayerScope::Opponent));
         let execute = def.execute.as_ref().expect("mill replacement must execute");
         match &*execute.effect {
             Effect::Mill {
@@ -8302,7 +8319,7 @@ mod tests {
             parse_replacement_line(text, "The Water Crystal").expect("must parse mill replacement");
 
         assert_eq!(def.event, ReplacementEvent::Mill);
-        assert_eq!(def.valid_player, Some(ControllerRef::Opponent));
+        assert_eq!(def.valid_player, Some(ReplacementPlayerScope::Opponent));
         let execute = def.execute.as_ref().expect("mill replacement must execute");
         match &*execute.effect {
             Effect::Mill { count, .. } => assert_eq!(
@@ -8316,6 +8333,34 @@ mod tests {
             ),
             other => panic!("expected Mill execute, got {other:?}"),
         }
+    }
+
+    /// CR 614.1a: Rain of Gore — "If a spell or ability would cause its
+    /// controller to gain life, that player loses that much life instead." The
+    /// periphrastic "would cause its controller to gain life" subject has no
+    /// "would gain life" substring; the widened entry gate must still route it
+    /// to a `GainLife` replacement with `AnyPlayer` scope and a `LoseLife`
+    /// execute of the replaced magnitude.
+    #[test]
+    fn parses_rain_of_gore_all_players_gain_life_replacement() {
+        let def = parse_replacement_line(
+            "If a spell or ability would cause its controller to gain life, \
+             that player loses that much life instead.",
+            "Rain of Gore",
+        )
+        .expect("Rain of Gore should parse as a replacement");
+        assert_eq!(def.event, ReplacementEvent::GainLife);
+        assert_eq!(
+            def.valid_player,
+            Some(ReplacementPlayerScope::AnyPlayer),
+            "Rain of Gore watches every player's life gain"
+        );
+        let execute = def.execute.as_ref().expect("must have a LoseLife execute");
+        assert!(
+            matches!(&*execute.effect, Effect::LoseLife { .. }),
+            "expected LoseLife execute, got {:?}",
+            execute.effect
+        );
     }
 
     #[test]

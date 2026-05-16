@@ -8716,6 +8716,25 @@ pub enum CombatDamageScope {
     NoncombatOnly,
 }
 
+/// CR 614.1a: Which player(s) a replacement effect applies to, scoped relative
+/// to the replacement source's controller. `valid_player: None` keeps the
+/// controller-only default; `Some(You)` is the explicit controller scope,
+/// `Some(Opponent)` an opponent-scoped replacement (Tainted Remedy), and
+/// `Some(AnyPlayer)` a global all-players replacement (Rain of Gore).
+///
+/// Serialized as a bare string (no `#[serde(tag)]`) to match the prior
+/// `Option<ControllerRef>` field encoding — existing persisted / in-flight
+/// `valid_player` values (`"You"` / `"Opponent"`) deserialize unchanged.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ReplacementPlayerScope {
+    /// The replacement source's controller.
+    You,
+    /// Any opponent of the replacement source's controller.
+    Opponent,
+    /// Every player in the game, regardless of who controls the source.
+    AnyPlayer,
+}
+
 /// Whether a replacement effect is mandatory or offers the affected player a choice.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -8818,10 +8837,11 @@ pub struct ReplacementDefinition {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_owner_redirect: Option<ControllerRef>,
     /// CR 614.1a: Restricts which player this replacement applies to.
-    /// "an opponent would gain life" → Some(Opponent). None = applies to controller only.
-    /// Parallel to `token_owner_scope` pattern.
+    /// "an opponent would gain life" → Some(Opponent); "a spell or ability would
+    /// cause its controller to gain life" (Rain of Gore) → Some(AnyPlayer).
+    /// None = applies to the replacement source's controller only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub valid_player: Option<ControllerRef>,
+    pub valid_player: Option<ReplacementPlayerScope>,
     /// Marks this replacement as consumed (one-shot). Skipped by find_applicable_replacements.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub is_consumed: bool,
