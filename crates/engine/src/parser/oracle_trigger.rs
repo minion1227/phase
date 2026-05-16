@@ -1799,6 +1799,13 @@ fn static_condition_to_trigger_condition(sc: &StaticCondition) -> Option<Trigger
             })
         }
 
+        // CR 702.185c: "a spell was warped this turn" — 1:1 bridge (same `variant`).
+        StaticCondition::SpellCastWithVariantThisTurn { variant } => {
+            Some(TriggerCondition::SpellCastWithVariantThisTurn {
+                variant: *variant,
+            })
+        }
+
         // CR 716.2a: Class level condition.
         StaticCondition::ClassLevelGE { level } => {
             Some(TriggerCondition::ClassLevelGE { level: *level })
@@ -1850,6 +1857,14 @@ fn static_condition_to_trigger_condition(sc: &StaticCondition) -> Option<Trigger
                     controller: controller.clone(),
                 }),
             }),
+            // CR 702.185c: "no spell was warped this turn" → Not(SpellCastWithVariantThisTurn).
+            StaticCondition::SpellCastWithVariantThisTurn { variant } => {
+                Some(TriggerCondition::Not {
+                    condition: Box::new(TriggerCondition::SpellCastWithVariantThisTurn {
+                        variant: *variant,
+                    }),
+                })
+            }
             _ => None,
         },
 

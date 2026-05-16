@@ -1666,7 +1666,7 @@ fn counter_threshold_to_condition(
     }
 }
 
-fn static_condition_to_ability_condition(
+pub(crate) fn static_condition_to_ability_condition(
     sc: &StaticCondition,
     ctx: &mut ParseContext,
 ) -> Option<AbilityCondition> {
@@ -1686,6 +1686,12 @@ fn static_condition_to_ability_condition(
         StaticCondition::WasStartingPlayer { controller } => {
             Some(AbilityCondition::WasStartingPlayer {
                 controller: controller.clone(),
+            })
+        }
+        // CR 702.185c: "a spell was warped this turn" — 1:1 bridge (same `variant`).
+        StaticCondition::SpellCastWithVariantThisTurn { variant } => {
+            Some(AbilityCondition::SpellCastWithVariantThisTurn {
+                variant: *variant,
             })
         }
         StaticCondition::IsMonarch => Some(AbilityCondition::IsMonarch),
@@ -1768,6 +1774,14 @@ fn static_condition_to_ability_condition(
                     controller: controller.clone(),
                 }),
             }),
+            // CR 702.185c: "no spell was warped this turn" → Not(SpellCastWithVariantThisTurn).
+            StaticCondition::SpellCastWithVariantThisTurn { variant } => {
+                Some(AbilityCondition::Not {
+                    condition: Box::new(AbilityCondition::SpellCastWithVariantThisTurn {
+                        variant: *variant,
+                    }),
+                })
+            }
             _ => None,
         },
         StaticCondition::SourceMatchesFilter { filter } => {

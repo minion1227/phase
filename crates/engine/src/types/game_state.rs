@@ -208,6 +208,13 @@ pub struct SpellCastRecord {
         deserialize_with = "deserialize_spell_cast_record_from_zone"
     )]
     pub from_zone: Zone,
+    /// CR 702.185c: The alternative-cast variant chosen when this spell was
+    /// cast (Warp, etc.), captured at cast-time so per-turn spell-history
+    /// conditions ("a spell was warped this turn") can answer after the spell
+    /// has left the stack. `#[serde(default)]` yields `CastingVariant::Normal`
+    /// for serialized snapshots predating this field.
+    #[serde(default)]
+    pub cast_variant: CastingVariant,
 }
 
 /// CR 601.2a: Default origin zone for `SpellCastRecord.from_zone`. Hand is the
@@ -229,6 +236,7 @@ impl Default for SpellCastRecord {
             mana_value: 0,
             has_x_in_cost: false,
             from_zone: Zone::Hand,
+            cast_variant: CastingVariant::Normal,
         }
     }
 }
@@ -5072,6 +5080,7 @@ mod tests {
             mana_value: 4,
             has_x_in_cost: false,
             from_zone: Zone::Graveyard,
+            cast_variant: CastingVariant::Normal,
         };
         let json = serde_json::to_string(&original).unwrap();
         let round_tripped: SpellCastRecord = serde_json::from_str(&json).unwrap();

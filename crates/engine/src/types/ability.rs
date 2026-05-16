@@ -3301,6 +3301,14 @@ pub enum StaticCondition {
     WasStartingPlayer {
         controller: ControllerRef,
     },
+    /// CR 702.185c: True when any player cast a spell using the named
+    /// alternative-cast `variant` (e.g. Warp) this turn. Parameterized by
+    /// `CastingVariant` so every "cast via X this turn" history query — not
+    /// just Warp — shares one variant. Not controller-scoped: "a spell was
+    /// warped this turn" matches a cast by any player.
+    SpellCastWithVariantThisTurn {
+        variant: crate::types::game_state::CastingVariant,
+    },
     /// CR 701.27: True when any opponent has at least this many poison counters.
     OpponentPoisonAtLeast {
         count: u32,
@@ -7671,6 +7679,13 @@ pub enum AbilityCondition {
     /// `AbilityCondition::Not`. `controller` selects whose start status is
     /// checked; `ControllerRef::You` is the canonical reading.
     WasStartingPlayer { controller: ControllerRef },
+    /// CR 702.185c + CR 608.2c: "if a spell was warped this turn" — gates a
+    /// follow-up effect on whether any player cast a spell using the named
+    /// alternative-cast `variant` this turn. Parameterized by `CastingVariant`
+    /// so every "cast via X this turn" history query shares one variant.
+    SpellCastWithVariantThisTurn {
+        variant: crate::types::game_state::CastingVariant,
+    },
     /// CR 500.8 + CR 506.1 + CR 608.2c: "if it's the first combat phase of the turn".
     /// Gates a follow-up effect on whether this is the first combat phase started this turn.
     FirstCombatPhaseOfTurn,
@@ -8014,6 +8029,13 @@ pub enum TriggerCondition {
     /// player, ..."). Negation is expressed via `Not`. `controller` selects
     /// whose start status is checked.
     WasStartingPlayer { controller: ControllerRef },
+    /// CR 702.185c: "if a spell was warped this turn" — true when any player
+    /// cast a spell using the named alternative-cast `variant` this turn.
+    /// Parameterized by `CastingVariant` so every "cast via X this turn"
+    /// history query shares one variant.
+    SpellCastWithVariantThisTurn {
+        variant: crate::types::game_state::CastingVariant,
+    },
     /// CR 702.131a: "if you have the city's blessing" — true when the controller has Ascend.
     HasCityBlessing,
     /// CR 309.7: True when the controller has completed a dungeon.

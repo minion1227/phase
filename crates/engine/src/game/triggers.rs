@@ -2672,6 +2672,12 @@ pub(crate) fn check_trigger_condition(
         // `ControllerRef::You` (Radiant Smite's Cycling trigger — "if you
         // weren't the starting player").
         TriggerCondition::WasStartingPlayer { .. } => state.current_starting_player == controller,
+        // CR 702.185c: True when any player cast a spell using `variant` (e.g.
+        // Warp) this turn. Not controller-scoped — scans every player's
+        // turn-history.
+        TriggerCondition::SpellCastWithVariantThisTurn { variant } => {
+            crate::game::restrictions::spell_cast_with_variant_this_turn(state, variant)
+        }
         // CR 725.1: True when the controller is the monarch.
         TriggerCondition::IsMonarch => state.monarch == Some(controller),
         // CR 702.131a: True when the controller has the city's blessing.
@@ -3845,6 +3851,7 @@ pub mod tests {
             mana_value: 1,
             has_x_in_cost: false,
             from_zone: Zone::Hand,
+            cast_variant: crate::types::game_state::CastingVariant::Normal,
         };
         let current_record = SpellCastRecord {
             name: String::new(),
@@ -3856,6 +3863,7 @@ pub mod tests {
             mana_value: 1,
             has_x_in_cost: false,
             from_zone: Zone::Hand,
+            cast_variant: crate::types::game_state::CastingVariant::Normal,
         };
         state.spells_cast_this_turn_by_player.insert(
             player,
@@ -6009,6 +6017,7 @@ pub mod tests {
                     mana_value: 1,
                     has_x_in_cost: false,
                     from_zone: Zone::Hand,
+                    cast_variant: crate::types::game_state::CastingVariant::Normal,
                 },
                 SpellCastRecord {
                     name: String::new(),
@@ -6020,6 +6029,7 @@ pub mod tests {
                     mana_value: 3,
                     has_x_in_cost: false,
                     from_zone: Zone::Hand,
+                    cast_variant: crate::types::game_state::CastingVariant::Normal,
                 },
             ]),
         );
@@ -8493,6 +8503,7 @@ pub mod tests {
                 mana_value: 3,
                 has_x_in_cost: true,
                 from_zone: Zone::Hand,
+                cast_variant: crate::types::game_state::CastingVariant::Normal,
             }]),
         );
         assert!(
@@ -8513,6 +8524,7 @@ pub mod tests {
                 mana_value: 1,
                 has_x_in_cost: false,
                 from_zone: Zone::Hand,
+                cast_variant: crate::types::game_state::CastingVariant::Normal,
             }]),
         );
         assert!(
@@ -8534,6 +8546,7 @@ pub mod tests {
                     mana_value: 2,
                     has_x_in_cost: true,
                     from_zone: Zone::Hand,
+                    cast_variant: crate::types::game_state::CastingVariant::Normal,
                 },
                 SpellCastRecord {
                     name: String::new(),
@@ -8545,6 +8558,7 @@ pub mod tests {
                     mana_value: 4,
                     has_x_in_cost: true,
                     from_zone: Zone::Hand,
+                    cast_variant: crate::types::game_state::CastingVariant::Normal,
                 },
             ]),
         );
@@ -8567,6 +8581,7 @@ pub mod tests {
                     mana_value: 2,
                     has_x_in_cost: true,
                     from_zone: Zone::Hand,
+                    cast_variant: crate::types::game_state::CastingVariant::Normal,
                 },
                 SpellCastRecord {
                     name: String::new(),
@@ -8578,6 +8593,7 @@ pub mod tests {
                     mana_value: 1,
                     has_x_in_cost: false,
                     from_zone: Zone::Hand,
+                    cast_variant: crate::types::game_state::CastingVariant::Normal,
                 },
                 SpellCastRecord {
                     name: String::new(),
@@ -8589,6 +8605,7 @@ pub mod tests {
                     mana_value: 4,
                     has_x_in_cost: true,
                     from_zone: Zone::Hand,
+                    cast_variant: crate::types::game_state::CastingVariant::Normal,
                 },
             ]),
         );
@@ -8611,6 +8628,7 @@ pub mod tests {
                 mana_value: 1,
                 has_x_in_cost: false,
                 from_zone: Zone::Hand,
+                cast_variant: crate::types::game_state::CastingVariant::Normal,
             }
         }
 

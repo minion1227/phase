@@ -5052,6 +5052,7 @@ mod tests {
                     mana_value: 3,
                     has_x_in_cost: false,
                     from_zone: Zone::Hand,
+                    cast_variant: crate::types::game_state::CastingVariant::Normal,
                 },
                 SpellCastRecord {
                     name: String::new(),
@@ -5063,6 +5064,7 @@ mod tests {
                     mana_value: 1,
                     has_x_in_cost: false,
                     from_zone: Zone::Hand,
+                    cast_variant: crate::types::game_state::CastingVariant::Normal,
                 },
             ]),
         );

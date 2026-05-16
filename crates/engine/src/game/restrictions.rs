@@ -148,8 +148,15 @@ pub fn record_spell_cast(
     state: &mut crate::types::game_state::GameState,
     player: PlayerId,
     obj: &GameObject,
+    cast_variant: crate::types::game_state::CastingVariant,
 ) {
-    record_spell_cast_from_zone(state, player, obj, obj.cast_from_zone.unwrap_or(Zone::Hand));
+    record_spell_cast_from_zone(
+        state,
+        player,
+        obj,
+        obj.cast_from_zone.unwrap_or(Zone::Hand),
+        cast_variant,
+    );
 }
 
 pub fn record_spell_cast_from_zone(
@@ -157,6 +164,7 @@ pub fn record_spell_cast_from_zone(
     player: PlayerId,
     obj: &GameObject,
     from_zone: Zone,
+    cast_variant: crate::types::game_state::CastingVariant,
 ) {
     state.spells_cast_this_turn = state.spells_cast_this_turn.saturating_add(1);
     *state.spells_cast_this_game.entry(player).or_insert(0) += 1;
@@ -174,6 +182,10 @@ pub fn record_spell_cast_from_zone(
         // mana cost each turn") does not need to re-examine the spell object.
         has_x_in_cost: crate::game::casting_costs::cost_has_x(&obj.mana_cost),
         from_zone,
+        // CR 702.185c: Capture the alternative-cast variant so per-turn
+        // spell-history conditions ("a spell was warped this turn") can
+        // resolve after the spell has left the stack.
+        cast_variant,
     };
     state
         .spells_cast_this_turn_by_player
@@ -188,6 +200,22 @@ pub fn record_spell_cast_from_zone(
         .entry(player)
         .or_default()
         .push_back(record);
+}
+
+/// CR 702.185c: True when any player cast a spell using `variant` this turn.
+/// `spells_cast_this_turn_by_player` is turn-scoped (cleared between turns), so
+/// this answers "a spell was warped this turn" (and any future "cast via X this
+/// turn" query) without inspecting the spell objects, which may have left the
+/// stack. Not controller-scoped — every player's history is scanned.
+pub fn spell_cast_with_variant_this_turn(
+    state: &crate::types::game_state::GameState,
+    variant: &crate::types::game_state::CastingVariant,
+) -> bool {
+    state
+        .spells_cast_this_turn_by_player
+        .values()
+        .flat_map(|records| records.iter())
+        .any(|record| &record.cast_variant == variant)
 }
 
 /// CR 508.1m: Any abilities that trigger on attackers being declared trigger.
@@ -1775,6 +1803,7 @@ mod tests {
                 mana_value: 1,
                 has_x_in_cost: false,
                 from_zone: Zone::Hand,
+                cast_variant: crate::types::game_state::CastingVariant::Normal,
             }]),
         );
 
@@ -1808,6 +1837,7 @@ mod tests {
                     mana_value: 1,
                     has_x_in_cost: false,
                     from_zone: Zone::Hand,
+                    cast_variant: crate::types::game_state::CastingVariant::Normal,
                 },
                 crate::types::game_state::SpellCastRecord {
                     name: String::new(),
@@ -1819,6 +1849,7 @@ mod tests {
                     mana_value: 2,
                     has_x_in_cost: false,
                     from_zone: Zone::Hand,
+                    cast_variant: crate::types::game_state::CastingVariant::Normal,
                 },
                 crate::types::game_state::SpellCastRecord {
                     name: String::new(),
@@ -1830,6 +1861,7 @@ mod tests {
                     mana_value: 3,
                     has_x_in_cost: false,
                     from_zone: Zone::Hand,
+                    cast_variant: crate::types::game_state::CastingVariant::Normal,
                 },
             ]),
         );
@@ -2240,7 +2272,12 @@ mod tests {
         );
 
         // First cast: pipeline records the spell.
-        record_spell_cast(&mut state, caster, &approach);
+        record_spell_cast(
+            &mut state,
+            caster,
+            &approach,
+            crate::types::game_state::CastingVariant::Normal,
+        );
         let history = state
             .spells_cast_this_game_by_player
             .get(&caster)
@@ -2258,7 +2295,12 @@ mod tests {
 
         // Second cast: same name, same player. The "another" gate (>= 2)
         // is now satisfied.
-        record_spell_cast(&mut state, caster, &approach);
+        record_spell_cast(
+            &mut state,
+            caster,
+            &approach,
+            crate::types::game_state::CastingVariant::Normal,
+        );
         assert_eq!(
             resolve_quantity(&state, &approach_count, caster, ObjectId(10)),
             2,
@@ -2268,11 +2310,65 @@ mod tests {
         // Cross-player scope safety: a different player's casts of the same
         // name must NOT count toward the caster's controller-scoped gate.
         let opponent = PlayerId(1);
-        record_spell_cast(&mut state, opponent, &approach);
+        record_spell_cast(
+            &mut state,
+            opponent,
+            &approach,
+            crate::types::game_state::CastingVariant::Normal,
+        );
         assert_eq!(
             resolve_quantity(&state, &approach_count, caster, ObjectId(10)),
             2,
             "controller-scoped count must ignore an opponent's named-Approach casts"
         );
+    }
+
+    /// CR 702.185c: `record_spell_cast` threads the `CastingVariant` onto the
+    /// persisted `SpellCastRecord`, and `spell_cast_with_variant_this_turn`
+    /// reads it. A warp cast makes "a spell was warped this turn" true; a
+    /// normal cast does not. Verifies the building block — the recording hook
+    /// and the resolver — independent of any single card.
+    #[test]
+    fn spell_cast_with_variant_this_turn_tracks_warp() {
+        use crate::game::game_object::GameObject;
+        use crate::types::game_state::CastingVariant;
+
+        let mut state = crate::types::game_state::GameState::new_two_player(7);
+        let caster = PlayerId(0);
+        let spell = GameObject::new(
+            ObjectId(20),
+            CardId(20),
+            caster,
+            "Warp Spell".to_string(),
+            Zone::Stack,
+        );
+
+        // No casts yet → false.
+        assert!(!spell_cast_with_variant_this_turn(
+            &state,
+            &CastingVariant::Warp
+        ));
+
+        // A normal cast records `CastingVariant::Normal` → warp query still false.
+        record_spell_cast(&mut state, caster, &spell, CastingVariant::Normal);
+        assert_eq!(
+            state.spells_cast_this_turn_by_player[&caster][0].cast_variant,
+            CastingVariant::Normal
+        );
+        assert!(!spell_cast_with_variant_this_turn(
+            &state,
+            &CastingVariant::Warp
+        ));
+
+        // A warp cast records `CastingVariant::Warp` → warp query becomes true.
+        record_spell_cast(&mut state, caster, &spell, CastingVariant::Warp);
+        assert_eq!(
+            state.spells_cast_this_turn_by_player[&caster][1].cast_variant,
+            CastingVariant::Warp
+        );
+        assert!(spell_cast_with_variant_this_turn(
+            &state,
+            &CastingVariant::Warp
+        ));
     }
 }

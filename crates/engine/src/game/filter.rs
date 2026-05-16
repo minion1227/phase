@@ -1224,6 +1224,7 @@ fn spell_cast_record_from_object(spell_obj: &GameObject) -> SpellCastRecord {
         mana_value: spell_obj.mana_cost.mana_value(),
         has_x_in_cost: crate::game::casting_costs::cost_has_x(&spell_obj.mana_cost),
         from_zone: spell_obj.zone,
+        cast_variant: crate::types::game_state::CastingVariant::Normal,
     }
 }
 
@@ -3267,6 +3268,7 @@ mod tests {
             mana_value: 3,
             has_x_in_cost: false,
             from_zone: Zone::Hand,
+            cast_variant: crate::types::game_state::CastingVariant::Normal,
         };
         let filter = TargetFilter::Typed(
             TypedFilter::creature()
@@ -3307,6 +3309,7 @@ mod tests {
             mana_value: 3,
             has_x_in_cost: true,
             from_zone: Zone::Hand,
+            cast_variant: crate::types::game_state::CastingVariant::Normal,
         };
         let non_x_record = SpellCastRecord {
             has_x_in_cost: false,
@@ -3338,6 +3341,7 @@ mod tests {
             mana_value: 2,
             has_x_in_cost: false,
             from_zone: Zone::Hand,
+            cast_variant: crate::types::game_state::CastingVariant::Normal,
         };
         let exile_record = SpellCastRecord {
             from_zone: Zone::Exile,
@@ -6102,6 +6106,7 @@ mod tests {
                 mana_value: 0,
                 has_x_in_cost: false,
                 from_zone: Zone::Hand,
+                cast_variant: crate::types::game_state::CastingVariant::Normal,
             }
         };
 
@@ -6499,6 +6504,7 @@ mod tests {
             mana_value: 7,
             has_x_in_cost: false,
             from_zone: Zone::Hand,
+            cast_variant: crate::types::game_state::CastingVariant::Normal,
         };
         let dragon_filter = make_subtype_filter("Dragon");
         let plains_filter = make_subtype_filter("Plains");

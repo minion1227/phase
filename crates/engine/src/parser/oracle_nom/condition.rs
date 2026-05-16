@@ -42,6 +42,29 @@ pub fn parse_condition(input: &str) -> OracleResult<'_, StaticCondition> {
 ///
 /// Useful when the prefix has already been consumed by the caller.
 pub fn parse_inner_condition(input: &str) -> OracleResult<'_, StaticCondition> {
+    alt((parse_condition_disjunction, parse_single_inner_condition)).parse(input)
+}
+
+/// CR 608.2c: "<condition A> or <condition B>" — a natural-language disjunction
+/// of two game-state conditions (Plasma Bolt's Void clause: "a nonland
+/// permanent left the battlefield this turn or a spell was warped this turn").
+/// Each side is parsed by the non-disjunction dispatcher (`parse_single_inner_
+/// condition`) to avoid left-recursion, and the result is wrapped in the
+/// existing `StaticCondition::Or` combinator. Tried before the single-condition
+/// dispatcher so the longer `A or B` phrase wins.
+fn parse_condition_disjunction(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, lhs) = parse_single_inner_condition(input)?;
+    let (rest, _) = tag(" or ").parse(rest)?;
+    let (rest, rhs) = parse_single_inner_condition(rest)?;
+    Ok((
+        rest,
+        StaticCondition::Or {
+            conditions: vec![lhs, rhs],
+        },
+    ))
+}
+
+fn parse_single_inner_condition(input: &str) -> OracleResult<'_, StaticCondition> {
     alt((
         parse_state_presence_conditions,
         parse_event_history_conditions,
@@ -2395,6 +2418,14 @@ fn parse_spell_history_condition(input: &str) -> OracleResult<'_, StaticConditio
         // "two or more spells were cast last turn" / "a player cast two or more spells last turn"
         parse_spells_cast_last_turn,
         parse_you_cast_both_spell_kinds_this_turn,
+        // CR 702.185c: "a spell was warped this turn" — any player cast a spell
+        // for its warp cost this turn.
+        value(
+            StaticCondition::SpellCastWithVariantThisTurn {
+                variant: crate::types::game_state::CastingVariant::Warp,
+            },
+            tag("a spell was warped this turn"),
+        ),
     ))
     .parse(input)
 }
@@ -8325,6 +8356,45 @@ mod tests {
                 assert_eq!(function, AggregateFunction::Max);
             }
             other => panic!("expected QuantityComparison, got {other:?}"),
+        }
+    }
+
+    /// CR 702.185c: "a spell was warped this turn" parses to the
+    /// `SpellCastWithVariantThisTurn { Warp }` condition.
+    #[test]
+    fn parse_inner_condition_spell_warped_this_turn() {
+        let (rest, c) = parse_inner_condition("a spell was warped this turn").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            c,
+            StaticCondition::SpellCastWithVariantThisTurn {
+                variant: crate::types::game_state::CastingVariant::Warp,
+            }
+        );
+    }
+
+    /// CR 608.2c + CR 702.185c: Plasma Bolt's Void clause — a two-sided
+    /// disjunction "<zone-history> or a spell was warped this turn" parses to
+    /// `StaticCondition::Or` over the existing left-half condition and the
+    /// warp-half condition.
+    #[test]
+    fn parse_inner_condition_nonland_left_or_spell_warped() {
+        let (rest, c) = parse_inner_condition(
+            "a nonland permanent left the battlefield this turn or a spell was warped this turn",
+        )
+        .unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::Or { conditions } => {
+                assert_eq!(conditions.len(), 2);
+                assert_eq!(
+                    conditions[1],
+                    StaticCondition::SpellCastWithVariantThisTurn {
+                        variant: crate::types::game_state::CastingVariant::Warp,
+                    }
+                );
+            }
+            other => panic!("expected Or, got {other:?}"),
         }
     }
 

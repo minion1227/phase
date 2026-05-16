@@ -660,6 +660,7 @@ fn should_resolve_subability_on_optional_decline(ability: &ResolvedAbility) -> b
             | AbilityCondition::ControllerControlsMatching { .. }
             | AbilityCondition::IsYourTurn
             | AbilityCondition::WasStartingPlayer { .. }
+            | AbilityCondition::SpellCastWithVariantThisTurn { .. }
             | AbilityCondition::FirstCombatPhaseOfTurn
             | AbilityCondition::ZoneChangedThisWay { .. }
             | AbilityCondition::CostPaidObjectMatchesFilter { .. }
@@ -2975,6 +2976,13 @@ fn evaluate_condition(
                 _ => ability.controller,
             };
             state.current_starting_player == subject
+        }
+        // CR 702.185c: True when any player cast a spell using `variant` (e.g.
+        // Warp) this turn. Plasma Bolt's Void clause is a spell-effect
+        // intervening condition, so this `AbilityCondition` arm is the one
+        // exercised at runtime.
+        AbilityCondition::SpellCastWithVariantThisTurn { variant } => {
+            crate::game::restrictions::spell_cast_with_variant_this_turn(state, variant)
         }
         AbilityCondition::IsMonarch => state.monarch == Some(ability.controller),
         // CR 702.131c: The city's blessing is a player designation that effects

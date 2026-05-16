@@ -6681,6 +6681,7 @@ fn cant_cast_filter_matches(
                 mana_value: spell_obj.mana_cost.mana_value(),
                 has_x_in_cost: super::casting_costs::cost_has_x(&spell_obj.mana_cost),
                 from_zone: spell_obj.zone,
+                cast_variant: crate::types::game_state::CastingVariant::Normal,
             };
             super::filter::spell_record_matches_filter(
                 &record,
@@ -6732,6 +6733,7 @@ fn is_blocked_by_per_turn_cast_limit(
                     mana_value: spell_obj.mana_cost.mana_value(),
                     has_x_in_cost: super::casting_costs::cost_has_x(&spell_obj.mana_cost),
                     from_zone: spell_obj.zone,
+                    cast_variant: crate::types::game_state::CastingVariant::Normal,
                 };
                 if !super::filter::spell_record_matches_filter(
                     &current_record,
@@ -14019,7 +14021,12 @@ mod tests {
 
         // Record one spell cast (clone to avoid borrow conflict)
         let obj_clone = state.objects.get(&spell_id).unwrap().clone();
-        restrictions::record_spell_cast(&mut state, PlayerId(0), &obj_clone);
+        restrictions::record_spell_cast(
+            &mut state,
+            PlayerId(0),
+            &obj_clone,
+            CastingVariant::Normal,
+        );
 
         // Now should be blocked
         let obj = state.objects.get(&spell_id).unwrap();
@@ -14039,8 +14046,18 @@ mod tests {
         let spell_id = make_spell_obj(&mut state, PlayerId(0), false);
 
         let obj_clone = state.objects.get(&spell_id).unwrap().clone();
-        restrictions::record_spell_cast(&mut state, PlayerId(0), &obj_clone);
-        restrictions::record_spell_cast(&mut state, PlayerId(1), &obj_clone);
+        restrictions::record_spell_cast(
+            &mut state,
+            PlayerId(0),
+            &obj_clone,
+            CastingVariant::Normal,
+        );
+        restrictions::record_spell_cast(
+            &mut state,
+            PlayerId(1),
+            &obj_clone,
+            CastingVariant::Normal,
+        );
 
         let obj = state.objects.get(&spell_id).unwrap();
         // Controller (P0) should be blocked
@@ -14062,8 +14079,18 @@ mod tests {
         let spell_id = make_spell_obj(&mut state, PlayerId(0), false);
 
         let obj_clone = state.objects.get(&spell_id).unwrap().clone();
-        restrictions::record_spell_cast(&mut state, PlayerId(0), &obj_clone);
-        restrictions::record_spell_cast(&mut state, PlayerId(1), &obj_clone);
+        restrictions::record_spell_cast(
+            &mut state,
+            PlayerId(0),
+            &obj_clone,
+            CastingVariant::Normal,
+        );
+        restrictions::record_spell_cast(
+            &mut state,
+            PlayerId(1),
+            &obj_clone,
+            CastingVariant::Normal,
+        );
 
         let obj = state.objects.get(&spell_id).unwrap();
         // Controller (P0) should NOT be blocked by their own "opponents" restriction
@@ -14090,7 +14117,7 @@ mod tests {
         // Cast a noncreature spell first
         let nc_id = make_spell_obj(&mut state, PlayerId(0), false);
         let nc_clone = state.objects.get(&nc_id).unwrap().clone();
-        restrictions::record_spell_cast(&mut state, PlayerId(0), &nc_clone);
+        restrictions::record_spell_cast(&mut state, PlayerId(0), &nc_clone, CastingVariant::Normal);
 
         // Trying to cast another noncreature → blocked
         let nc_obj = state.objects.get(&nc_id).unwrap();
@@ -14124,12 +14151,22 @@ mod tests {
 
         // First cast OK
         let obj_clone = state.objects.get(&spell_id).unwrap().clone();
-        restrictions::record_spell_cast(&mut state, PlayerId(0), &obj_clone);
+        restrictions::record_spell_cast(
+            &mut state,
+            PlayerId(0),
+            &obj_clone,
+            CastingVariant::Normal,
+        );
         let obj = state.objects.get(&spell_id).unwrap();
         assert!(!is_blocked_by_per_turn_cast_limit(&state, PlayerId(0), obj));
 
         // Second cast OK
-        restrictions::record_spell_cast(&mut state, PlayerId(0), &obj_clone);
+        restrictions::record_spell_cast(
+            &mut state,
+            PlayerId(0),
+            &obj_clone,
+            CastingVariant::Normal,
+        );
 
         // Third cast → blocked
         let obj = state.objects.get(&spell_id).unwrap();
@@ -14159,7 +14196,12 @@ mod tests {
 
         // Record one spell cast
         let obj_clone = state.objects.get(&spell_id).unwrap().clone();
-        restrictions::record_spell_cast(&mut state, PlayerId(0), &obj_clone);
+        restrictions::record_spell_cast(
+            &mut state,
+            PlayerId(0),
+            &obj_clone,
+            CastingVariant::Normal,
+        );
 
         // Blocked: B's limit of 1 applies
         let obj = state.objects.get(&spell_id).unwrap();
@@ -14746,6 +14788,7 @@ mod tests {
                 mana_value: 1,
                 has_x_in_cost: false,
                 from_zone: Zone::Hand,
+                cast_variant: crate::types::game_state::CastingVariant::Normal,
             }]),
         );
 

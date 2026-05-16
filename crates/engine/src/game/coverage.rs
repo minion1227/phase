@@ -4764,6 +4764,11 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
         AbilityCondition::IsYourTurn => ("IsYourTurn", Handled),
         // CR 103.1: starting-player check; handled by `evaluate_condition` (effects/mod.rs).
         AbilityCondition::WasStartingPlayer { .. } => ("WasStartingPlayer", Handled),
+        // CR 702.185c: "a spell was warped this turn"; handled by
+        // `evaluate_condition` (effects/mod.rs).
+        AbilityCondition::SpellCastWithVariantThisTurn { .. } => {
+            ("SpellCastWithVariantThisTurn", Handled)
+        }
         // CR 500.8 + CR 506.1 + CR 608.2c: combat-phase count check; handled by
         // `evaluate_condition` (effects/mod.rs).
         AbilityCondition::FirstCombatPhaseOfTurn => ("FirstCombatPhaseOfTurn", Handled),
@@ -4980,6 +4985,11 @@ fn static_condition_feature(cond: &StaticCondition) -> (&'static str, FeatureSup
         StaticCondition::CompletedADungeon => ("CompletedADungeon", Unhandled),
         // CR 103.1: bridges to Ability/Trigger `WasStartingPlayer`, both runtime-handled.
         StaticCondition::WasStartingPlayer { .. } => ("WasStartingPlayer", Handled),
+        // CR 702.185c: "a spell was warped this turn"; bridges to Ability/Trigger
+        // `SpellCastWithVariantThisTurn`, both runtime-handled.
+        StaticCondition::SpellCastWithVariantThisTurn { .. } => {
+            ("SpellCastWithVariantThisTurn", Handled)
+        }
         StaticCondition::OpponentPoisonAtLeast { .. } => ("OpponentPoisonAtLeast", Unhandled),
         StaticCondition::UnlessPay { .. } => ("UnlessPay", Handled),
         StaticCondition::ControlsCommander => ("ControlsCommander", Unhandled),

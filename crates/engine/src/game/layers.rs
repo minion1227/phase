@@ -381,6 +381,11 @@ fn evaluate_condition_with_context(
         // CR 103.1: True when the scoped player took the first turn of the
         // game (fixed at game start). The parser emits `ControllerRef::You`.
         StaticCondition::WasStartingPlayer { .. } => state.current_starting_player == controller,
+        // CR 702.185c: True when any player cast a spell using `variant` (e.g.
+        // Warp) this turn. Not controller-scoped.
+        StaticCondition::SpellCastWithVariantThisTurn { variant } => {
+            crate::game::restrictions::spell_cast_with_variant_this_turn(state, variant)
+        }
         // CR 400.7: True when the source permanent entered the battlefield this turn.
         StaticCondition::SourceEnteredThisTurn => state
             .objects

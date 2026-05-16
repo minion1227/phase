@@ -508,7 +508,10 @@ use crate::parser::oracle_ir::ast::ActivatedConstraintAst;
 /// The "instead" keyword signals a cross-line replacement pattern. The trailing
 /// "if [condition]" (when present after "instead") is parsed through the shared
 /// condition grammar and composed with any ability-word condition at the caller.
-fn strip_instead_suffix(text: &str) -> (String, Option<AbilityCondition>, bool) {
+fn strip_instead_suffix(
+    text: &str,
+    ctx: &mut ParseContext,
+) -> (String, Option<AbilityCondition>, bool) {
     let lower = text.to_lowercase();
     let tp = TextPair::new(text, &lower);
 
@@ -518,7 +521,7 @@ fn strip_instead_suffix(text: &str) -> (String, Option<AbilityCondition>, bool) 
         let condition = parse_inner_condition(condition_text)
             .ok()
             .and_then(|(rest, condition)| rest.trim().is_empty().then_some(condition))
-            .and_then(|condition| ability_word_to_ability_condition(&Some(condition)));
+            .and_then(|condition| ability_word_to_ability_condition(&Some(condition), ctx));
         return (before.original.trim().to_string(), condition, true);
     }
 
@@ -895,15 +898,27 @@ fn ability_word_to_condition(word: &str) -> Option<crate::types::ability::Static
             })
         }
         // allow-noncombinator: semantic mapping after ability-word parser has classified the word
+        // CR 702.x: Ferocious — "you control a creature with power 4 or greater".
+        // The `InZone { Battlefield }` property is emitted explicitly so this
+        // ability-word condition is structurally identical to the literal
+        // "you control a creature with power 4 or greater" clause parsed by
+        // `parse_inner_condition`, letting `merge_ability_condition` dedup the
+        // two when a card prints both (e.g. Feed the Clan's "Ferocious — …
+        // instead if you control a creature with power 4 or greater").
         "ferocious" => Some(StaticCondition::QuantityComparison {
             lhs: QuantityExpr::Ref {
                 qty: QuantityRef::ObjectCount {
                     filter: TargetFilter::Typed(
                         TypedFilter::creature()
                             .controller(ControllerRef::You)
-                            .properties(vec![FilterProp::PowerGE {
-                                value: QuantityExpr::Fixed { value: 4 },
-                            }]),
+                            .properties(vec![
+                                FilterProp::PowerGE {
+                                    value: QuantityExpr::Fixed { value: 4 },
+                                },
+                                FilterProp::InZone {
+                                    zone: Zone::Battlefield,
+                                },
+                            ]),
                     ),
                 },
             },
@@ -916,23 +931,20 @@ fn ability_word_to_condition(word: &str) -> Option<crate::types::ability::Static
 }
 
 /// Convert an ability-word `StaticCondition` to an `AbilityCondition` for spell effects.
+/// CR 608.2c: Bridge an ability-word / "instead if" `StaticCondition` to its
+/// effect-resolution `AbilityCondition` form. Delegates to the single
+/// authoritative bridge (`static_condition_to_ability_condition`) so every
+/// `StaticCondition` variant — including compound `Or`/`And`, `WasStartingPlayer`,
+/// and `SpellCastWithVariantThisTurn` — is handled uniformly rather than via a
+/// narrow per-call duplicate.
 fn ability_word_to_ability_condition(
     cond: &Option<crate::types::ability::StaticCondition>,
+    ctx: &mut ParseContext,
 ) -> Option<crate::types::ability::AbilityCondition> {
-    use crate::types::ability::{AbilityCondition, StaticCondition};
-    match cond.as_ref()? {
-        StaticCondition::QuantityComparison {
-            lhs,
-            comparator,
-            rhs,
-        } => Some(AbilityCondition::QuantityCheck {
-            lhs: lhs.clone(),
-            comparator: *comparator,
-            rhs: rhs.clone(),
-        }),
-        StaticCondition::HasMaxSpeed => Some(AbilityCondition::HasMaxSpeed),
-        _ => None,
-    }
+    crate::parser::oracle_effect::conditions::static_condition_to_ability_condition(
+        cond.as_ref()?,
+        ctx,
+    )
 }
 
 /// Single-authority merge for composing a freshly-parsed `AbilityCondition` onto an
@@ -2396,7 +2408,7 @@ pub(crate) fn parse_oracle_ir(
             // mid-position MV conditions (e.g., "if it has mana value 4 or less")
             // that precede "instead if [ability word condition]".
             let (effect_line_clean, instead_condition, is_instead) =
-                strip_instead_suffix(&effect_line);
+                strip_instead_suffix(&effect_line, &mut ctx);
             let parse_line = if is_instead {
                 effect_line_clean.as_str()
             } else {
@@ -2433,7 +2445,10 @@ pub(crate) fn parse_oracle_ir(
             // the chain-extracted condition is merged onto it, preserving the
             // historical `[ability_word, chain]` ordering when both are distinct.
             let chain = def.condition.take();
-            def.condition = match (ability_word_to_ability_condition(&aw_condition), chain) {
+            def.condition = match (
+                ability_word_to_ability_condition(&aw_condition, &mut ctx),
+                chain,
+            ) {
                 (Some(aw), Some(chain)) => Some(merge_ability_condition(Some(aw), chain)),
                 (Some(aw), None) => Some(aw),
                 (None, chain) => chain,
