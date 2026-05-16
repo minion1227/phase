@@ -94,6 +94,12 @@ pub const ORDERING_MANIFEST: &[((&str, &str), OrderingClass)] = &[
         ("TriggerDefinition", "trigger_zones"),
         OrderingClass::SetEquivalent,
     ),
+    // CR 603.2: disjunctive zone-change clauses — the trigger fires if the
+    // event matches ANY clause, so clause order is incidental. Set.
+    (
+        ("TriggerDefinition", "zone_change_clauses"),
+        OrderingClass::SetEquivalent,
+    ),
     // Player actions enumerate equivalent triggers; order is incidental.
     (
         ("TriggerDefinition", "player_actions"),
