@@ -1364,26 +1364,39 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
     // --- "~ isn't a [type] [as long as <cond>]" (layer-4 type removal) ---
     // CR 613.1d: Layer 4 type-changing effects. The clause splitter upstream
     // (`try_split_inverted_as_long_as`) rewrites "As long as <cond>, ~ isn't
-    // a <type>." into canonical "~ isn't a <type> as long as <cond>"; we
-    // mirror the " as long as " split used by `parse_continuous_gets_has`
-    // (CR 611.3a) so both orientations produce non-empty modifications plus
-    // an attached condition.
-    if let Ok((_, (_, type_rest))) = nom_primitives::split_once_on(tp.lower, "isn't a ") {
-        // type_rest is a suffix of tp.lower; original/lower have equal byte
-        // lengths, so we can recover the original-case slice by offsetting
-        // from tp.original by the same length.
-        let type_rest_original = &tp.original[tp.original.len() - type_rest.len()..];
-        let type_rest_tp = TextPair::new(type_rest_original, type_rest);
-        let (type_text_tp, condition_tp) = match type_rest_tp.split_around(" as long as ") {
-            Some((before, after)) => (before, Some(after)),
-            None => (type_rest_tp, None),
-        };
+    // a <type>." into canonical "~ isn't a <type> as long as <cond>"; both
+    // orientations must produce non-empty modifications plus an attached
+    // condition (CR 611.3a).
+    //
+    // The "isn't a <type>" type-removal modification must come from the
+    // EFFECT clause. In the canonical inverted form "<effect> as long as
+    // <condition>", an "isn't a" inside the condition (Animate Artifact's
+    // "as long as enchanted artifact isn't a creature") is NOT the
+    // modification — that card removes nothing and instead animates. Scope the
+    // scan to the pre-condition slice so the condition body cannot drive it.
+    let (effect_slice_tp, trailing_condition_tp) = match tp.split_around(" as long as ") {
+        Some((before, after)) => (before, Some(after)),
+        None => (tp, None),
+    };
+    if let Ok((_, (_, type_rest))) =
+        nom_primitives::split_once_on(effect_slice_tp.lower, "isn't a ")
+    {
+        // type_rest is a suffix of effect_slice_tp.lower; original/lower have
+        // equal byte lengths, so the original-case slice is recovered by
+        // offsetting from effect_slice_tp.original (NOT tp.original — after
+        // scoping the scan the suffix no longer belongs to tp.lower).
+        let type_rest_original =
+            &effect_slice_tp.original[effect_slice_tp.original.len() - type_rest.len()..];
+        let type_text_tp = TextPair::new(type_rest_original, type_rest);
+        // The condition is already isolated as `trailing_condition_tp`; no
+        // inner " as long as " strip is needed.
+        let condition_tp = trailing_condition_tp;
         let type_name = type_text_tp.lower.trim().trim_end_matches('.');
-        // Pre-anchored slice — `split_once_on("isn't a ")` consumed everything
-        // up to and including "isn't a ", and we then stripped a trailing
-        // " as long as …" clause. What remains is the type word plus an
-        // optional trailing period, so a literal `match` on the five core
-        // types is idiomatic enum-conversion (not parsing dispatch).
+        // Pre-anchored slice — `split_once_on("isn't a ")` over the
+        // condition-free effect slice consumed everything up to and including
+        // "isn't a ". What remains is the type word plus an optional trailing
+        // period, so a literal `match` on the five core types is idiomatic
+        // enum-conversion (not parsing dispatch).
         let core_type = match type_name {
             "creature" => Some(CoreType::Creature),
             "artifact" => Some(CoreType::Artifact),
@@ -1407,6 +1420,14 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
             }
             return Some(def);
         }
+    }
+
+    // --- "[pronoun]'s a/an <types> with <P/T clause> [as long as <cond>]" ---
+    // CR 613.1d + CR 613.1g: self-referential conditional animation static
+    // (Animate Artifact). Dispatched after the `isn't a` type-removal block so
+    // the condition-is-`isn't a creature` case (this card) reaches it.
+    if let Some(def) = parse_pronoun_becomes_type_static(&tp, &text) {
+        return Some(def);
     }
 
     // --- "~ can't be blocked [by filter] [as long as condition]" ---
@@ -7409,6 +7430,72 @@ fn parse_base_pt_mod(text: &str) -> Option<(i32, i32)> {
     let tp = TextPair::new(text, &lower);
     let pt_text = tp.strip_after("base power and toughness ")?.original.trim();
     parse_pt_mod(pt_text)
+}
+
+/// CR 613.1d + CR 613.1g: "[pronoun]'s a/an <types> with power and toughness
+/// each equal to its mana value [as long as <condition>]" — a self-referential
+/// conditional animation static. Covers Animate Artifact and the class of
+/// dynamic-P/T-by-mana-value "it's a/an X creature" become-creature statics.
+///
+/// Scoped to the dynamic-P/T-by-MV case only. Fixed-literal P/T (`it's a 3/4
+/// …`) and keyword tails (`with flying`) are deliberately deferred to a
+/// FOLLOWUP — this function does NOT reuse `parse_animation_modifications`
+/// (which rejects `it's an` and drops the P/T clause).
+fn parse_pronoun_becomes_type_static(tp: &TextPair<'_>, text: &str) -> Option<StaticDefinition> {
+    // STEP A — peel a trailing " as long as <condition>" FIRST. The canonical
+    // inverted-form rewrite produces "<effect> as long as <condition>"; the
+    // condition must come off before the effect is parsed, or it leaks into
+    // the " with " tail and never becomes a StaticCondition.
+    let (effect_tp, condition_tp) = match tp.split_around(" as long as ") {
+        Some((before, after)) => (before, Some(after)),
+        None => (*tp, None),
+    };
+
+    // STEP B — pronoun + article prefix. `it's an` must be accepted alongside
+    // `it's a`; the existing `parse_animation_modifications` rejects `it's an`.
+    let body = nom_tag_tp(&effect_tp, "it's a ")
+        .or_else(|| nom_tag_tp(&effect_tp, "it's an "))
+        .or_else(|| nom_tag_tp(&effect_tp, "~'s a "))
+        .or_else(|| nom_tag_tp(&effect_tp, "~'s an "))?;
+    let mut modifications = Vec::new();
+
+    // STEP C — split the type expression from the " with <P/T clause>" tail.
+    let (type_part, with_tail) = match body.split_around(" with ") {
+        Some((before, after)) => (before, Some(after)),
+        None => (body, None),
+    };
+
+    // STEP D — types: delegate to the existing animation type-token parser.
+    modifications.extend(
+        super::oracle_effect::animation::parse_becomes_type_modifications(type_part.original),
+    );
+
+    // STEP E — P/T-by-mana-value clause only (fixed/keyword tails deferred).
+    // If a " with " tail is present but is not the P/T-by-MV clause, the
+    // helper pushes nothing and the static still carries its type
+    // modifications — acceptable for this unit's class.
+    if let Some(tail) = &with_tail {
+        push_base_pt_mana_value_dynamic_modifications(&mut modifications, tail.lower);
+    }
+
+    if modifications.is_empty() {
+        return None;
+    }
+
+    // STEP F — attach the condition peeled in STEP A.
+    let mut def = StaticDefinition::continuous()
+        .affected(TargetFilter::SelfRef)
+        .modifications(modifications)
+        .description(text.to_string());
+    if let Some(cond_tp) = condition_tp {
+        let cond_text = cond_tp.original.trim().trim_end_matches('.');
+        let condition =
+            parse_static_condition(cond_text).unwrap_or(StaticCondition::Unrecognized {
+                text: cond_text.to_string(),
+            });
+        def = def.condition(condition);
+    }
+    Some(def)
 }
 
 fn parse_base_pt_mana_value_dynamic(lower: &str) -> Option<QuantityExpr> {
@@ -19176,5 +19263,104 @@ mod snapshot_tests {
             }
             other => panic!("expected Typed creature filter, got {other:?}"),
         }
+    }
+
+    /// CR 613.1d + CR 613.1g: `parse_pronoun_becomes_type_static` on the
+    /// canonical effect clause must emit AddType for each type and dynamic
+    /// set-P/T scoped to the object's mana value (Recipient scope).
+    #[test]
+    fn pronoun_becomes_type_static_dynamic_pt_by_mana_value() {
+        let text =
+            "it's an artifact creature with power and toughness each equal to its mana value";
+        let lower = text.to_lowercase();
+        let tp = TextPair::new(text, &lower);
+        let def =
+            parse_pronoun_becomes_type_static(&tp, text).expect("expected a become-type static");
+        let mods = &def.modifications;
+        assert!(
+            mods.contains(&ContinuousModification::AddType {
+                core_type: CoreType::Artifact
+            }),
+            "expected AddType(Artifact) in {mods:?}"
+        );
+        assert!(
+            mods.contains(&ContinuousModification::AddType {
+                core_type: CoreType::Creature
+            }),
+            "expected AddType(Creature) in {mods:?}"
+        );
+        let mv_ref = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectManaValue {
+                scope: ObjectScope::Recipient,
+            },
+        };
+        assert!(
+            mods.contains(&ContinuousModification::SetPowerDynamic {
+                value: mv_ref.clone()
+            }),
+            "expected SetPowerDynamic(ObjectManaValue Recipient) in {mods:?}"
+        );
+        assert!(
+            mods.contains(&ContinuousModification::SetToughnessDynamic { value: mv_ref }),
+            "expected SetToughnessDynamic(ObjectManaValue Recipient) in {mods:?}"
+        );
+        assert!(matches!(def.affected, Some(TargetFilter::SelfRef)));
+    }
+
+    /// Animate Artifact: the full inverted-form line must parse to a single
+    /// animation static (AddType + dynamic P/T) with a non-null condition —
+    /// NOT a `RemoveType { Creature }` driven by the condition body.
+    #[test]
+    fn animate_artifact_inverted_form_animates_not_removes_type() {
+        let def = parse_static_line(
+            "As long as enchanted artifact isn't a creature, it's an artifact creature \
+             with power and toughness each equal to its mana value.",
+        )
+        .expect("expected a static for Animate Artifact");
+        let mods = &def.modifications;
+        assert!(
+            mods.iter()
+                .all(|m| !matches!(m, ContinuousModification::RemoveType { .. })),
+            "Animate Artifact must not remove a type, got {mods:?}"
+        );
+        assert!(
+            mods.contains(&ContinuousModification::AddType {
+                core_type: CoreType::Creature
+            }),
+            "expected AddType(Creature) in {mods:?}"
+        );
+        assert!(
+            mods.iter()
+                .any(|m| matches!(m, ContinuousModification::SetPowerDynamic { .. })),
+            "expected dynamic P/T in {mods:?}"
+        );
+        assert!(
+            def.condition.is_some(),
+            "expected a non-null condition (clears Condition_AsLongAs warning)"
+        );
+    }
+
+    /// Regression: the layer-4 `isn't a` type-removal path must still fire
+    /// when `isn't a creature` IS the effect (the 26-God class, e.g. Erebos),
+    /// producing `RemoveType { Creature }` plus the devotion condition.
+    #[test]
+    fn isnt_a_creature_as_effect_still_removes_type() {
+        let def = parse_static_line(
+            "As long as your devotion to black is less than five, \
+             Erebos, God of the Dead isn't a creature.",
+        )
+        .expect("expected a static for the Erebos-class line");
+        assert!(
+            def.modifications
+                .contains(&ContinuousModification::RemoveType {
+                    core_type: CoreType::Creature
+                }),
+            "expected RemoveType(Creature) in {:?}",
+            def.modifications
+        );
+        assert!(
+            def.condition.is_some(),
+            "expected the devotion condition attached"
+        );
     }
 }
