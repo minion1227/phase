@@ -3290,6 +3290,20 @@ impl UnlessPayScaling {
     }
 }
 
+/// Ownership scope for a commander-control condition.
+/// CR 903.3 distinguishes "your commander" (owner-scoped) from "a commander"
+/// (controller-only).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CommanderOwnership {
+    /// CR 903.3 + CR 109.5: "your commander" — the commander must be owned AND
+    /// controlled by the evaluating player. Used by the Lieutenant ability word.
+    Own,
+    /// CR 903.3d: "a commander" — any commander on the battlefield controlled by
+    /// the evaluating player, regardless of owner (a stolen opponent's commander
+    /// counts).
+    Any,
+}
+
 /// Condition for static ability applicability.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -3462,9 +3476,12 @@ pub enum StaticCondition {
     RingLevelAtLeast {
         level: u8,
     },
-    /// CR 903.3: True when the controller controls at least one of their commander(s).
-    /// Used for Lieutenant mechanic ("if you control your commander").
-    ControlsCommander,
+    /// CR 903.3 + CR 109.5: "you control your commander" — owner-scoped (Lieutenant).
+    /// CR 903.3d: "you control a commander" — controller-only, any owner.
+    /// The `ownership` field selects which CR condition this is.
+    ControlsCommander {
+        ownership: CommanderOwnership,
+    },
     /// CR 110.5b: True when the source object is tapped.
     /// Used for "for as long as ~ remains tapped" duration conditions.
     SourceIsTapped,
@@ -8385,9 +8402,10 @@ pub enum TriggerCondition {
     ManaSpentCondition { text: String },
     /// CR 400.7: "if it had a +1/+1 counter on it" / "if it had counters on it"
     HadCounters { counter_type: Option<CounterType> },
-    /// CR 903.3: "if you control your commander" — Lieutenant mechanic.
-    /// True when the controller controls at least one of their commander(s) on the battlefield.
-    ControlsCommander,
+    /// CR 903.3 + CR 109.5: "if you control your commander" — owner-scoped (Lieutenant).
+    /// CR 903.3d: "if you control a commander" — controller-only, any owner.
+    /// The `ownership` field selects which CR condition this is.
+    ControlsCommander { ownership: CommanderOwnership },
     /// CR 702.112a: "if ~ is renowned" — true when the source has been made renowned.
     SourceIsRenowned,
     /// CR 711.2a + CR 711.2b: Level-up creature trigger gating — true when the source has at least

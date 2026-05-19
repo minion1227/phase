@@ -10773,7 +10773,9 @@ mod trigger_target_tests {
                 ],
                 constraints: vec![ModalSelectionConstraint::ConditionalMaxChoices {
                     condition: crate::types::ability::ModalSelectionCondition::Static {
-                        condition: StaticCondition::ControlsCommander,
+                        condition: StaticCondition::ControlsCommander {
+                            ownership: crate::types::ability::CommanderOwnership::Any,
+                        },
                     },
                     max_choices: 2,
                     otherwise_max_choices: 1,

@@ -5059,7 +5059,7 @@ fn static_condition_feature(cond: &StaticCondition) -> (&'static str, FeatureSup
         }
         StaticCondition::OpponentPoisonAtLeast { .. } => ("OpponentPoisonAtLeast", Unhandled),
         StaticCondition::UnlessPay { .. } => ("UnlessPay", Handled),
-        StaticCondition::ControlsCommander => ("ControlsCommander", Unhandled),
+        StaticCondition::ControlsCommander { .. } => ("ControlsCommander", Unhandled),
         StaticCondition::SourceIsEquipped => ("SourceIsEquipped", Unhandled),
         StaticCondition::SourceIsMonstrous => ("SourceIsMonstrous", Unhandled),
         StaticCondition::SourceAttachedToCreature => ("SourceAttachedToCreature", Unhandled),

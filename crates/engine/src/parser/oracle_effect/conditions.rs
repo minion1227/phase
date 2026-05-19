@@ -2052,7 +2052,7 @@ pub(crate) fn static_condition_to_ability_condition(
         | StaticCondition::Unrecognized { .. }
         | StaticCondition::RingLevelAtLeast { .. }
         | StaticCondition::CompletedADungeon
-        | StaticCondition::ControlsCommander
+        | StaticCondition::ControlsCommander { .. }
         | StaticCondition::EnchantedIsFaceDown
         | StaticCondition::SourceControllerEquals { .. }
         // CR 702.166a: Bargain payment is a cost-determination predicate with no

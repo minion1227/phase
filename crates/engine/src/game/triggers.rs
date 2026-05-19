@@ -1,10 +1,10 @@
 use std::collections::HashSet;
 
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, ChosenAttribute, ControllerRef,
-    CopyRetargetPermission, DelayedTriggerCondition, Effect, ModalChoice, PlayerFilter,
-    QuantityExpr, ResolvedAbility, TargetFilter, TargetRef, TributeOutcome, TriggerCondition,
-    TriggerDefinition, TypeFilter, TypedFilter,
+    AbilityCost, AbilityDefinition, AbilityKind, ChosenAttribute, CommanderOwnership,
+    ControllerRef, CopyRetargetPermission, DelayedTriggerCondition, Effect, ModalChoice,
+    PlayerFilter, QuantityExpr, ResolvedAbility, TargetFilter, TargetRef, TributeOutcome,
+    TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::CoreType;
 use crate::types::events::{GameEvent, ManaTapState};
@@ -2915,17 +2915,16 @@ pub(crate) fn check_trigger_condition(
                 None => !p.completed.is_empty(),
                 Some(dungeon) => p.completed.contains(dungeon),
             }),
-        // CR 903.3: True when the controller controls at least one of their commander(s).
-        TriggerCondition::ControlsCommander => {
-            // Commander designation is stored per-player. Check if any permanent on the
-            // battlefield owned by and controlled by this player is a commander.
-            state.battlefield.iter().any(|id| {
-                state
-                    .objects
-                    .get(id)
-                    .is_some_and(|obj| obj.controller == controller && obj.is_commander)
-            })
-        }
+        // CR 903.3 / CR 903.3d: Lieutenant ("your commander") requires ownership;
+        // generic ("a commander") is controller-only.
+        TriggerCondition::ControlsCommander { ownership } => match ownership {
+            CommanderOwnership::Own => {
+                crate::game::commander::controls_own_commander(state, controller)
+            }
+            CommanderOwnership::Any => {
+                crate::game::commander::controls_any_commander(state, controller)
+            }
+        },
         // CR 702.112a: True when the source permanent has been made renowned.
         TriggerCondition::SourceIsRenowned => source_id
             .and_then(|id| state.objects.get(&id))
@@ -3164,12 +3163,12 @@ pub mod tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AdditionalCost,
-        AggregateFunction, ChosenAttribute, ChosenSubtypeKind, Comparator, ContinuousModification,
-        ControllerRef, DelayedTriggerCondition, Duration, Effect, FilterProp, GainLifePlayer,
-        KickerVariant, MultiTargetSpec, PaymentCost, PlayerFilter, PlayerScope, QuantityExpr,
-        QuantityRef, ResolvedAbility, SharedQuality, SharedQualityRelation, StaticCondition,
-        StaticDefinition, TargetFilter, TargetRef, TriggerCondition, TriggerConstraint,
-        TriggerDefinition, TypeFilter, TypedFilter,
+        AggregateFunction, ChosenAttribute, ChosenSubtypeKind, CommanderOwnership, Comparator,
+        ContinuousModification, ControllerRef, DelayedTriggerCondition, Duration, Effect,
+        FilterProp, GainLifePlayer, KickerVariant, MultiTargetSpec, PaymentCost, PlayerFilter,
+        PlayerScope, QuantityExpr, QuantityRef, ResolvedAbility, SharedQuality,
+        SharedQualityRelation, StaticCondition, StaticDefinition, TargetFilter, TargetRef,
+        TriggerCondition, TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
@@ -3237,6 +3236,51 @@ pub mod tests {
         obj.power = Some(power);
         obj.toughness = Some(toughness);
         id
+    }
+
+    /// Places a battlefield commander object with the given owner/controller.
+    fn make_commander(state: &mut GameState, owner: PlayerId, controller: PlayerId) -> ObjectId {
+        let id = make_creature(state, owner, "Test Commander", 3, 3);
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.is_commander = true;
+        obj.controller = controller;
+        id
+    }
+
+    /// CR 903.3 + CR 109.5: the trigger-mirror Lieutenant condition ("you control
+    /// your commander") is NOT satisfied by a stolen opponent's commander.
+    /// Revert-discriminating: pre-fix controller-only code returns `true`.
+    #[test]
+    fn trigger_controls_commander_own_excludes_stolen() {
+        let mut state = setup();
+        // Opponent (P1) owns the commander; you (P0) have gained control.
+        make_commander(&mut state, PlayerId(1), PlayerId(0));
+        assert!(!check_trigger_condition(
+            &state,
+            &TriggerCondition::ControlsCommander {
+                ownership: CommanderOwnership::Own,
+            },
+            PlayerId(0),
+            None,
+            None,
+        ));
+    }
+
+    /// CR 903.3d: the generic trigger-mirror condition ("you control a commander")
+    /// STILL counts a stolen opponent's commander.
+    #[test]
+    fn trigger_controls_commander_any_counts_stolen() {
+        let mut state = setup();
+        make_commander(&mut state, PlayerId(1), PlayerId(0));
+        assert!(check_trigger_condition(
+            &state,
+            &TriggerCondition::ControlsCommander {
+                ownership: CommanderOwnership::Any,
+            },
+            PlayerId(0),
+            None,
+            None,
+        ));
     }
 
     fn make_soulbond_creature(state: &mut GameState, player: PlayerId, name: &str) -> ObjectId {

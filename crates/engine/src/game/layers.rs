@@ -9,8 +9,9 @@ use crate::game::quantity::{filter_uses_recipient, quantity_expr_uses_recipient,
 use crate::game::speed::{effective_speed, has_max_speed};
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, BasicLandType, CastingPermission,
-    ContinuousModification, CopiableValues, Duration, Effect, ManaContribution, ManaProduction,
-    PlayerScope, QuantityExpr, StaticCondition, StaticDefinition, TargetFilter, TypedFilter,
+    CommanderOwnership, ContinuousModification, CopiableValues, Duration, Effect, ManaContribution,
+    ManaProduction, PlayerScope, QuantityExpr, StaticCondition, StaticDefinition, TargetFilter,
+    TypedFilter,
 };
 use crate::types::attribution::EffectRef;
 use crate::types::card_type::{is_land_subtype, CoreType};
@@ -632,13 +633,16 @@ fn evaluate_condition_with_context(
             .dungeon_progress
             .get(&controller)
             .is_some_and(|p| !p.completed.is_empty()),
-        // CR 903.3: True when the controller controls at least one of their commanders.
-        StaticCondition::ControlsCommander => state.battlefield.iter().any(|id| {
-            state
-                .objects
-                .get(id)
-                .is_some_and(|obj| obj.controller == controller && obj.is_commander)
-        }),
+        // CR 903.3 / CR 903.3d: Lieutenant ("your commander") requires ownership;
+        // generic ("a commander") is controller-only.
+        StaticCondition::ControlsCommander { ownership } => match ownership {
+            CommanderOwnership::Own => {
+                crate::game::commander::controls_own_commander(state, controller)
+            }
+            CommanderOwnership::Any => {
+                crate::game::commander::controls_any_commander(state, controller)
+            }
+        },
     }
 }
 
@@ -2469,10 +2473,10 @@ mod tests {
     use crate::game::scenario::GameScenario;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, BasicLandType, ChosenSubtypeKind, ContinuousModification,
-        ControllerRef, CountScope, Duration, Effect, FilterProp, GainLifePlayer, ObjectScope,
-        PlayerScope, QuantityExpr, QuantityRef, StaticCondition, StaticDefinition, TargetFilter,
-        TriggerCondition, TypeFilter, TypedFilter, ZoneRef,
+        AbilityDefinition, AbilityKind, BasicLandType, ChosenSubtypeKind, CommanderOwnership,
+        ContinuousModification, ControllerRef, CountScope, Duration, Effect, FilterProp,
+        GainLifePlayer, ObjectScope, PlayerScope, QuantityExpr, QuantityRef, StaticCondition,
+        StaticDefinition, TargetFilter, TriggerCondition, TypeFilter, TypedFilter, ZoneRef,
     };
     use crate::types::card_type::CoreType;
     use crate::types::game_state::TransientContinuousEffect;
@@ -2514,6 +2518,86 @@ mod tests {
         obj.base_toughness = Some(toughness);
         obj.timestamp = ts;
         id
+    }
+
+    /// Places a battlefield commander object with the given owner/controller.
+    fn make_commander(state: &mut GameState, owner: PlayerId, controller: PlayerId) -> ObjectId {
+        let id = make_creature(state, "Test Commander", 3, 3, owner);
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.is_commander = true;
+        obj.controller = controller;
+        id
+    }
+
+    /// CR 903.3 + CR 109.5: Lieutenant ("you control your commander") is satisfied
+    /// when a commander you own is on the battlefield under your control.
+    #[test]
+    fn lieutenant_satisfied_by_own_controlled_commander() {
+        let mut state = setup();
+        let demon = make_creature(&mut state, "Demon", 4, 4, PlayerId(0));
+        make_commander(&mut state, PlayerId(0), PlayerId(0));
+        assert!(evaluate_condition_for_test(
+            &state,
+            &StaticCondition::ControlsCommander {
+                ownership: CommanderOwnership::Own,
+            },
+            PlayerId(0),
+            demon,
+        ));
+    }
+
+    /// CR 903.3 + CR 109.5: THE bug — controlling a STOLEN opponent's commander
+    /// does NOT satisfy the Lieutenant "your commander" condition. Revert-
+    /// discriminating: pre-fix controller-only code returns `true`.
+    #[test]
+    fn lieutenant_not_satisfied_by_stolen_opponent_commander() {
+        let mut state = setup();
+        let demon = make_creature(&mut state, "Demon", 4, 4, PlayerId(0));
+        // Opponent (P1) owns the commander; you (P0) have gained control of it.
+        make_commander(&mut state, PlayerId(1), PlayerId(0));
+        assert!(!evaluate_condition_for_test(
+            &state,
+            &StaticCondition::ControlsCommander {
+                ownership: CommanderOwnership::Own,
+            },
+            PlayerId(0),
+            demon,
+        ));
+    }
+
+    /// CR 903.3 + CR 109.5: the controller half is still required — your own
+    /// commander controlled by an opponent does NOT satisfy Lieutenant.
+    #[test]
+    fn lieutenant_not_satisfied_when_own_commander_controlled_by_opponent() {
+        let mut state = setup();
+        let demon = make_creature(&mut state, "Demon", 4, 4, PlayerId(0));
+        make_commander(&mut state, PlayerId(0), PlayerId(1));
+        assert!(!evaluate_condition_for_test(
+            &state,
+            &StaticCondition::ControlsCommander {
+                ownership: CommanderOwnership::Own,
+            },
+            PlayerId(0),
+            demon,
+        ));
+    }
+
+    /// CR 903.3d: the generic "you control a commander" condition STILL counts a
+    /// stolen opponent's commander. Regression guard against the parameterization
+    /// silently inheriting the `Own` predicate.
+    #[test]
+    fn generic_control_a_commander_counts_stolen_opponent_commander() {
+        let mut state = setup();
+        let src = make_creature(&mut state, "Source", 1, 1, PlayerId(0));
+        make_commander(&mut state, PlayerId(1), PlayerId(0));
+        assert!(evaluate_condition_for_test(
+            &state,
+            &StaticCondition::ControlsCommander {
+                ownership: CommanderOwnership::Any,
+            },
+            PlayerId(0),
+            src,
+        ));
     }
 
     /// CR 613.4c + CR 704.5f: A runaway `+X/+X` chain (e.g. from a `ObjectCount`

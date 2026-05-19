@@ -1973,8 +1973,12 @@ fn static_condition_to_trigger_condition(sc: &StaticCondition) -> Option<Trigger
             Some(TriggerCondition::CompletedDungeon { specific: None })
         }
 
-        // CR 903.3: Commander control bridges directly.
-        StaticCondition::ControlsCommander => Some(TriggerCondition::ControlsCommander),
+        // CR 903.3: Commander control bridges directly, carrying the ownership scope.
+        StaticCondition::ControlsCommander { ownership } => {
+            Some(TriggerCondition::ControlsCommander {
+                ownership: *ownership,
+            })
+        }
     }
 }
 

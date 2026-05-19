@@ -18,9 +18,10 @@ use super::quantity as nom_quantity;
 use crate::parser::oracle_target::{parse_type_phrase, parse_zone_suffix};
 use crate::parser::oracle_util::parse_subtype;
 use crate::types::ability::{
-    AggregateFunction, CastManaObjectScope, CastManaSpentMetric, Comparator, ControllerRef,
-    CountScope, DamageGroupKey, FilterProp, ObjectProperty, ObjectScope, PlayerScope, QuantityExpr,
-    QuantityRef, SharedQuality, StaticCondition, TargetFilter, TypeFilter, TypedFilter, ZoneRef,
+    AggregateFunction, CastManaObjectScope, CastManaSpentMetric, CommanderOwnership, Comparator,
+    ControllerRef, CountScope, DamageGroupKey, FilterProp, ObjectProperty, ObjectScope,
+    PlayerScope, QuantityExpr, QuantityRef, SharedQuality, StaticCondition, TargetFilter,
+    TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::events::PlayerActionKind;
@@ -459,13 +460,19 @@ fn parse_player_state_conditions(input: &str) -> OracleResult<'_, StaticConditio
             },
             tag("you were the starting player"),
         ),
-        // CR 903.3: Commander control (Lieutenant mechanic)
+        // CR 903.3 + CR 109.5: "your commander" — owner-scoped (Lieutenant).
         value(
-            StaticCondition::ControlsCommander,
-            alt((
-                tag("you control your commander"),
-                tag("you control a commander"),
-            )),
+            StaticCondition::ControlsCommander {
+                ownership: CommanderOwnership::Own,
+            },
+            tag("you control your commander"),
+        ),
+        // CR 903.3d: "a commander" — controller-only, any owner.
+        value(
+            StaticCondition::ControlsCommander {
+                ownership: CommanderOwnership::Any,
+            },
+            tag("you control a commander"),
         ),
     ))
     .parse(input)
@@ -7656,10 +7663,27 @@ mod tests {
     // -- "you control your commander" --
 
     #[test]
-    fn test_you_control_your_commander() {
+    fn test_you_control_your_commander_is_own() {
         let (rest, c) = parse_inner_condition("you control your commander").unwrap();
         assert_eq!(rest, "");
-        assert_eq!(c, StaticCondition::ControlsCommander);
+        assert_eq!(
+            c,
+            StaticCondition::ControlsCommander {
+                ownership: CommanderOwnership::Own,
+            }
+        );
+    }
+
+    #[test]
+    fn test_you_control_a_commander_is_any() {
+        let (rest, c) = parse_inner_condition("you control a commander").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            c,
+            StaticCondition::ControlsCommander {
+                ownership: CommanderOwnership::Any,
+            }
+        );
     }
 
     // -- "a creature died under your control this turn" --

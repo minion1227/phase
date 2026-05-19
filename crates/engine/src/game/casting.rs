@@ -13482,7 +13482,9 @@ mod tests {
                 .constraints
                 .push(ModalSelectionConstraint::ConditionalMaxChoices {
                     condition: ModalSelectionCondition::Static {
-                        condition: StaticCondition::ControlsCommander,
+                        condition: StaticCondition::ControlsCommander {
+                            ownership: crate::types::ability::CommanderOwnership::Any,
+                        },
                     },
                     max_choices: 2,
                     otherwise_max_choices: 1,
@@ -13514,7 +13516,9 @@ mod tests {
                 .constraints
                 .push(ModalSelectionConstraint::ConditionalMaxChoices {
                     condition: ModalSelectionCondition::Static {
-                        condition: StaticCondition::ControlsCommander,
+                        condition: StaticCondition::ControlsCommander {
+                            ownership: crate::types::ability::CommanderOwnership::Any,
+                        },
                     },
                     max_choices: 2,
                     otherwise_max_choices: 1,

@@ -38,14 +38,28 @@ pub fn commander_casts_from_command_zone(state: &GameState, player: PlayerId) ->
         .sum()
 }
 
-/// CR 903.3d: If an effect refers to controlling a commander, it refers to a
-/// permanent on the battlefield that is a commander.
-pub fn controls_commander(state: &GameState, player: PlayerId) -> bool {
+/// CR 903.3d: "you control a commander" (generic) — true when any commander on
+/// the battlefield is controlled by `player`, regardless of owner. A stolen
+/// opponent's commander DOES satisfy this condition.
+pub fn controls_any_commander(state: &GameState, player: PlayerId) -> bool {
     state.battlefield.iter().any(|id| {
         state
             .objects
             .get(id)
             .is_some_and(|obj| obj.controller == player && obj.is_commander)
+    })
+}
+
+/// CR 903.3 + CR 109.5: "you control your commander" (Lieutenant) — true when a
+/// commander on the battlefield is both owned AND controlled by `player`. A
+/// commander the player has gained control of from an opponent is that
+/// opponent's commander, not the player's, so it does NOT satisfy this condition.
+pub fn controls_own_commander(state: &GameState, player: PlayerId) -> bool {
+    state.battlefield.iter().any(|id| {
+        state
+            .objects
+            .get(id)
+            .is_some_and(|obj| obj.is_commander && obj.owner == player && obj.controller == player)
     })
 }
 
