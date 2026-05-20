@@ -69,7 +69,7 @@ export function TriggerOrderModal() {
     >
       <div className="px-3 py-3 lg:px-5 lg:py-5">
         <div className="mb-2 text-xs uppercase tracking-wide text-white/50">
-          Resolves first (top of stack)
+          Resolves last (bottom of stack)
         </div>
         <ol className="flex flex-col gap-2">
           {order.map((engineIndex, position) => {
@@ -114,7 +114,7 @@ export function TriggerOrderModal() {
           })}
         </ol>
         <div className="mt-2 text-xs uppercase tracking-wide text-white/50">
-          Resolves last (bottom of stack)
+          Resolves first (top of stack)
         </div>
       </div>
     </DialogShell>
