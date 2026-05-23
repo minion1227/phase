@@ -7360,6 +7360,11 @@ fn has_anaphoric_reference(lower: &str) -> bool {
     false
 }
 
+fn explicit_any_target_clause(effect: &Effect, lower: &str) -> bool {
+    matches!(effect.target_filter(), Some(TargetFilter::Any))
+        && nom_primitives::scan_contains(lower, "any target")
+}
+
 /// Replace the target filter on an effect with ParentTarget.
 /// Used for anaphoric "it"/"that creature" references in compound sub-effects.
 fn replace_target_with_parent(effect: &mut Effect) {
@@ -11633,6 +11638,7 @@ pub(crate) fn parse_effect_chain_ir(
             && has_anaphoric_reference(&text_lower)
             && !matches!(if_you_do_anchor, Some(TargetFilter::SelfRef))
             && !typed_trigger_subject
+            && !explicit_any_target_clause(&clause.effect, &text_lower)
             && !replace_fight_subject_with_parent_if_anaphoric_subject(
                 &text_lower,
                 &mut clause.effect,
@@ -11647,6 +11653,7 @@ pub(crate) fn parse_effect_chain_ir(
             })
             && has_anaphoric_reference(&text_lower)
             && !typed_trigger_subject
+            && !explicit_any_target_clause(&clause.effect, &text_lower)
             && !replace_fight_subject_with_parent_if_anaphoric_subject(
                 &text_lower,
                 &mut clause.effect,
@@ -11662,6 +11669,7 @@ pub(crate) fn parse_effect_chain_ir(
             && chain_has_prior_typed_referent(&clauses)
             && has_anaphoric_reference(&text_lower)
             && !typed_trigger_subject
+            && !explicit_any_target_clause(&clause.effect, &text_lower)
             && !replace_fight_subject_with_parent_if_anaphoric_subject(
                 &text_lower,
                 &mut clause.effect,
@@ -34465,6 +34473,59 @@ mod tests {
             !has_pay_unimpl(&def),
             "rider must NOT leak as Unimplemented{{name:'pay'}} sibling"
         );
+    }
+
+    #[test]
+    fn reflexive_damage_any_target_keeps_explicit_target() {
+        let def = super::parse_effect_chain(
+            "Sacrifice a creature. When you do, Minsc & Boo deals X damage to any target, where X is that creature's power. If the sacrificed creature was a Hamster, draw X cards.",
+            AbilityKind::Spell,
+        );
+        assert!(matches!(&*def.effect, Effect::Sacrifice { .. }));
+
+        let damage = def.sub_ability.as_ref().expect("damage sub-ability");
+        assert_eq!(damage.condition, Some(AbilityCondition::WhenYouDo));
+        let Effect::DealDamage {
+            amount:
+                QuantityExpr::Ref {
+                    qty:
+                        QuantityRef::Power {
+                            scope: ObjectScope::CostPaidObject,
+                        },
+                },
+            target: TargetFilter::Any,
+            ..
+        } = damage.effect.as_ref()
+        else {
+            panic!(
+                "expected reflexive damage to keep Any target and cost-paid power, got {:?}",
+                damage.effect
+            );
+        };
+
+        let draw = damage
+            .sub_ability
+            .as_ref()
+            .expect("Hamster draw sub-ability");
+        assert!(matches!(
+            &*draw.effect,
+            Effect::Draw {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: ObjectScope::CostPaidObject
+                    }
+                },
+                ..
+            }
+        ));
+        assert!(matches!(
+            draw.condition,
+            Some(AbilityCondition::CostPaidObjectMatchesFilter {
+                filter: TargetFilter::Typed(TypedFilter { ref type_filters, .. })
+            }) if type_filters.iter().any(|filter| {
+                matches!(filter, TypeFilter::Subtype(subtype) if subtype == "Hamster")
+            })
+        ));
     }
 
     #[test]
