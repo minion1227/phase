@@ -22,6 +22,18 @@ class_name = "LobbyDO"
 tag = "v1"
 new_sqlite_classes = ["LobbyDO"]
 
+# Workers Logs — persistent per-invocation logs in the dashboard Observability
+# tab (status, outcome, exceptions, and our structured console.* output). The
+# always-on Workers *Metrics* view masks our failure mode: a TURN-mint failure
+# returns a handled `Response(502)`, which counts as a "Success" invocation, so
+# it's invisible there. These logs (and the zone HTTP-status view) are the only
+# way to actually see relay-mint failures. Free tier: 200k logs/day, 3-day
+# retention; head_sampling_rate=1 logs every request (this endpoint is low-volume
+# and every relay failure matters).
+[observability]
+enabled = true
+head_sampling_rate = 1
+
 [vars]
 # Cloudflare Realtime TURN key ID (NOT secret — useless without the API token,
 # which is set via `wrangler secret put TURN_KEY_API_TOKEN`).

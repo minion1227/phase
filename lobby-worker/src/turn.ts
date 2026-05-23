@@ -33,6 +33,28 @@ function corsHeaders(request: Request, env: TurnEnv): Record<string, string> {
   };
 }
 
+/**
+ * Client network context for relay attribution + diagnostics, read from
+ * `request.cf` (Cloudflare edge metadata). `customIdentifier` is sent to the
+ * TURN API so relay egress/ingress bytes become queryable per client network in
+ * the GraphQL analytics — surfacing which carriers (notably CGNAT / symmetric-
+ * NAT mobile networks) actually drive relay demand, and flagging a single
+ * network burning the quota. The same fields are logged on every mint so the
+ * Worker Logs view tells you *who* requested relay even before bytes flow.
+ */
+function clientContext(request: Request): {
+  colo: string;
+  country: string;
+  asn: number;
+  customIdentifier: string;
+} {
+  const cf = request.cf as IncomingRequestCfProperties | undefined;
+  const colo = cf?.colo ?? "unknown";
+  const country = cf?.country ?? "XX";
+  const asn = cf?.asn ?? 0;
+  return { colo, country, asn, customIdentifier: `${country}-AS${asn}` };
+}
+
 export async function handleTurnCredentials(
   request: Request,
   env: TurnEnv,
@@ -46,6 +68,8 @@ export async function handleTurnCredentials(
   if (!env.TURN_KEY_ID || !env.TURN_KEY_API_TOKEN) {
     // Not configured yet — the client falls back to STUN-only (direct/STUN
     // connections still work; symmetric-NAT peers won't relay until this is set).
+    // Hitting this in production means relay is silently off for the whole app.
+    console.error({ event: "turn_unconfigured" });
     return Response.json(
       {
         error:
@@ -56,6 +80,7 @@ export async function handleTurnCredentials(
   }
 
   const ttl = Number(env.TURN_TTL_SECONDS ?? "86400");
+  const ctx = clientContext(request);
   const cfRes = await fetch(
     `https://rtc.live.cloudflare.com/v1/turn/keys/${env.TURN_KEY_ID}/credentials/generate-ice-servers`,
     {
@@ -64,16 +89,22 @@ export async function handleTurnCredentials(
         Authorization: `Bearer ${env.TURN_KEY_API_TOKEN}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ ttl }),
+      body: JSON.stringify({ ttl, customIdentifier: ctx.customIdentifier }),
     },
   );
 
   if (!cfRes.ok) {
+    // The failure mode that drops a symmetric-NAT peer to STUN-only and breaks
+    // them. Logged as an error so it stands out in Workers Logs (the Metrics
+    // view counts this handled 502 as a "Success" invocation).
+    console.error({ event: "turn_mint_failed", upstreamStatus: cfRes.status, ...ctx });
     return Response.json(
       { error: `TURN credential generation failed (${cfRes.status})` },
       { status: 502, headers: cors },
     );
   }
+
+  console.log({ event: "turn_mint_ok", ...ctx });
 
   // CF returns `{ iceServers: [ {stun}, {turn, username, credential} ] }` —
   // already an RTCIceServer[] the client drops straight into RTCConfiguration.
