@@ -6484,6 +6484,27 @@ fn try_split_targeted_compound(text: &str, ctx: &mut ParseContext) -> Option<Par
         }
     }
 
+    // CR 608.2c: Verb carry-forward for mass-object continuations.
+    // "untap it and all Samurai you control" splits into sub-text
+    // "all Samurai you control"; prepend the primary verb so the existing
+    // mass parser sees "untap all Samurai you control".
+    if matches!(sub_clause.effect, Effect::Unimplemented { .. })
+        && alt((
+            tag::<_, _, OracleError<'_>>("all "),
+            tag::<_, _, OracleError<'_>>("each "),
+        ))
+        .parse(sub_lower.as_str())
+        .is_ok()
+    {
+        if let Some(verb) = extract_effect_verb(&primary_effect) {
+            let reparsed_text = format!("{verb} {sub_text}");
+            let reparsed = parse_imperative_effect(&reparsed_text, &mut continuation_ctx);
+            if !matches!(reparsed.effect, Effect::Unimplemented { .. }) {
+                sub_clause = reparsed;
+            }
+        }
+    }
+
     // CR 608.2c + CR 701.8a: Self-reference carry-forward for compound actions.
     // "destroy that creature and ~" splits on " and " into sub-text "~" which
     // lacks a verb. Prepend the primary verb so it becomes "destroy ~" — parsed
@@ -17561,6 +17582,33 @@ mod tests {
                 );
             }
             other => panic!("expected Destroy, got {:?}", other),
+        }
+    }
+
+    /// CR 608.2c: Verb carry-forward for mass-object continuations.
+    /// Godo, Bandit Warlord: "untap it and all Samurai you control" must parse
+    /// the second conjunct as UntapAll rather than dropping the bare noun phrase.
+    #[test]
+    fn compound_verb_carry_forward_all_prefix() {
+        let clause = parse_effect_clause(
+            "untap it and all Samurai you control",
+            &mut ParseContext::default(),
+        );
+        assert!(
+            matches!(clause.effect, Effect::Untap { .. }),
+            "primary clause must be Untap, got {:?}",
+            clause.effect
+        );
+        let sub = clause
+            .sub_ability
+            .expect("must have sub_ability for mass continuation");
+        match sub.effect.as_ref() {
+            Effect::UntapAll { target } => {
+                let tf = typed_leg(target).expect("mass untap target should be typed");
+                assert!(has_type(tf, TypeFilter::Subtype("Samurai".to_string())));
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+            }
+            other => panic!("sub-clause must be UntapAll, got {:?}", other),
         }
     }
 
