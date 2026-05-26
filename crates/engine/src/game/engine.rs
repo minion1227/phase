@@ -3261,6 +3261,7 @@ fn apply_action(
                 mode_abilities: vec![],
                 description: Some("Miracle — you may cast this card".to_string()),
                 may_trigger_origin: None,
+                subject_match_count: None,
             };
             super::triggers::push_pending_trigger_to_stack(state, trigger, &mut events);
 
@@ -3676,10 +3677,17 @@ fn apply_action(
             // `PayCost { ScaledMana, payer: TriggeringPlayer }` continuation
             // resolves the payer correctly — the trigger's resolution is still
             // in flight.
+            // CR 603.2c + CR 608.2: the batched-trigger subject count is also
+            // part of the trigger's resolution scope — mirror its save/restore
+            // so an `EventContextAmount` inside the resumed continuation reads
+            // the original "that many" instead of `None`.
             let previous_trigger_event = state.current_trigger_event.clone();
+            let previous_trigger_match_count = state.current_trigger_match_count;
             state.current_trigger_event = pending_event;
+            state.current_trigger_match_count = state.pending_optional_trigger_match_count.take();
             effects::drain_pending_continuation(state, &mut events);
             state.current_trigger_event = previous_trigger_event;
+            state.current_trigger_match_count = previous_trigger_match_count;
             state.waiting_for.clone()
         }
         // CR 707.10c: Copy retarget — player chose target for the current slot
@@ -11129,6 +11137,7 @@ mod trigger_target_tests {
             mode_abilities: vec![],
             description: None,
             may_trigger_origin: None,
+            subject_match_count: None,
         });
 
         let legal_targets = vec![TargetRef::Object(target1), TargetRef::Object(target2)];
@@ -11220,6 +11229,7 @@ mod trigger_target_tests {
             mode_abilities: vec![],
             description: None,
             may_trigger_origin: None,
+            subject_match_count: None,
         });
 
         state.waiting_for = WaitingFor::TriggerTargetSelection {
@@ -11290,6 +11300,7 @@ mod trigger_target_tests {
             )],
             description: Some("Choose two target players".to_string()),
             may_trigger_origin: None,
+            subject_match_count: None,
         });
         state.waiting_for = WaitingFor::AbilityModeChoice {
             player: PlayerId(0),
@@ -11397,6 +11408,7 @@ mod trigger_target_tests {
             ],
             description: Some("Whenever you cast your second spell each turn".to_string()),
             may_trigger_origin: None,
+            subject_match_count: None,
         });
         state.waiting_for = WaitingFor::AbilityModeChoice {
             player: PlayerId(0),
@@ -11513,6 +11525,7 @@ mod trigger_target_tests {
             ],
             description: Some("Choose one or both with commander".to_string()),
             may_trigger_origin: None,
+            subject_match_count: None,
         });
 
         let waiting = begin_pending_trigger_target_selection(&mut state)
@@ -11582,6 +11595,7 @@ mod trigger_target_tests {
             mode_abilities: vec![],
             description: None,
             may_trigger_origin: None,
+            subject_match_count: None,
         });
         state.waiting_for = WaitingFor::TriggerTargetSelection {
             player: PlayerId(0),
@@ -11700,6 +11714,7 @@ mod trigger_target_tests {
             mode_abilities: vec![],
             description: None,
             may_trigger_origin: None,
+            subject_match_count: None,
         });
         state.waiting_for = WaitingFor::TriggerTargetSelection {
             player: PlayerId(0),
@@ -11792,6 +11807,7 @@ mod trigger_target_tests {
             )],
             description: Some("Choose different target players".to_string()),
             may_trigger_origin: None,
+            subject_match_count: None,
         });
         state.waiting_for = WaitingFor::AbilityModeChoice {
             player: PlayerId(0),
@@ -11893,6 +11909,7 @@ mod trigger_target_tests {
             ],
             description: None,
             may_trigger_origin: None,
+            subject_match_count: None,
         });
 
         // Call the private function via the engine path.
@@ -12568,6 +12585,7 @@ mod exile_return_tests {
                 condition: None,
                 trigger_event: None,
                 source_name: String::new(),
+                subject_match_count: None,
             },
         });
 
