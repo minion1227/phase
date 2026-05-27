@@ -17105,6 +17105,7 @@ fn try_parse_put_zone_change(lower: &str, text: &str) -> Option<Effect> {
                 Some(prefix_len) => before.original[..prefix_len].trim(),
                 None => target_text,
             };
+            let up_to = parse_up_to_one_target_prefix(before.lower);
             let (target, _) = parse_target(target_text);
             // CR 202.3 + CR 107.3i: A trailing "where X is <expression>"
             // defining clause (Birthing Ritual: "...with mana value X or less
@@ -17116,10 +17117,10 @@ fn try_parse_put_zone_change(lower: &str, text: &str) -> Option<Effect> {
             // `parse_where_x_quantity_expression` building block.
             let where_x_expression = strip_trailing_where_x(after_put_tp).1;
             let target = apply_where_x_to_filter(target, where_x_expression.as_deref());
-            // CR 701.33: Restrict the target to cards revealed by the preceding
-            // Dig effect when the phrase "revealed this way" appears in the
-            // target text. The Dig resolver populates `state.tracked_object_sets`
-            // with the kept (revealed) cards; `TargetFilter::TrackedSetFiltered`
+            // CR 608.2c: Restrict the target to objects affected by the
+            // preceding effect when a "this way" result phrase appears in the
+            // target text. The relevant resolvers publish `state.tracked_object_sets`
+            // with the affected objects; `TargetFilter::TrackedSetFiltered`
             // reads that set and intersects it with the original type filter.
             // `TrackedSetId(0)` is a sentinel resolved to the most recent
             // tracked set (via the existing `bind_tracked_set_to_effect` pass
@@ -17127,9 +17128,19 @@ fn try_parse_put_zone_change(lower: &str, text: &str) -> Option<Effect> {
             // set via `filter_inner`'s lookup). Used by Zimone's Experiment:
             // "Put all land cards revealed this way onto the battlefield
             // tapped and put all creature cards revealed this way into your
-            // hand."
+            // hand", and Mind Roots: "Put up to one land card discarded this
+            // way onto the battlefield tapped under your control."
             let target = if from_among_anaphor.is_some()
-                || scan_contains_phrase(before.lower, "revealed this way")
+                || [
+                    "revealed this way",
+                    "discarded this way",
+                    "milled this way",
+                    "exiled this way",
+                    "sacrificed this way",
+                    "destroyed this way",
+                ]
+                .iter()
+                .any(|phrase| scan_contains_phrase(before.lower, phrase))
             {
                 TargetFilter::TrackedSetFiltered {
                     id: crate::types::identifiers::TrackedSetId(0),
@@ -17173,13 +17184,20 @@ fn try_parse_put_zone_change(lower: &str, text: &str) -> Option<Effect> {
                 under_your_control,
                 enter_tapped,
                 enters_attacking,
-                up_to: false,
+                up_to,
                 enter_with_counters,
             });
         }
     }
 
     None
+}
+
+fn parse_up_to_one_target_prefix(input: &str) -> bool {
+    let trimmed = input.trim_start();
+    tag::<_, _, OracleError<'_>>("up to one ")
+        .parse(trimmed)
+        .is_ok()
 }
 
 fn parse_battlefield_transformed_qualifier(tail_lower: &str) -> bool {
@@ -25334,6 +25352,52 @@ mod tests {
                 }
                 other => panic!("expected Typed(Creature), got {other:?}"),
             },
+            other => panic!("expected TrackedSetFiltered, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn put_discarded_card_this_way_uses_tracked_set_filter() {
+        let def = parse_effect_chain(
+            "Target player discards two cards. Put up to one land card discarded this way onto the battlefield tapped under your control.",
+            AbilityKind::Spell,
+        );
+
+        assert!(
+            matches!(&*def.effect, Effect::Discard { .. }),
+            "primary effect should be Discard, got {:?}",
+            def.effect
+        );
+
+        let sub = def
+            .sub_ability
+            .as_ref()
+            .expect("discard should chain to the put-onto-battlefield effect");
+        let Effect::ChangeZone {
+            destination,
+            target,
+            under_your_control,
+            enter_tapped,
+            up_to,
+            ..
+        } = &*sub.effect
+        else {
+            panic!("expected ChangeZone sub-ability, got {:?}", sub.effect);
+        };
+        assert_eq!(*destination, Zone::Battlefield);
+        assert!(*under_your_control);
+        assert!(*enter_tapped);
+        assert!(*up_to);
+        match target {
+            TargetFilter::TrackedSetFiltered { id, filter } => {
+                assert_eq!(*id, TrackedSetId(0));
+                match filter.as_ref() {
+                    TargetFilter::Typed(tf) => {
+                        assert_eq!(tf.type_filters, vec![TypeFilter::Land]);
+                    }
+                    other => panic!("expected tracked-set filter to preserve Land, got {other:?}"),
+                }
+            }
             other => panic!("expected TrackedSetFiltered, got {other:?}"),
         }
     }

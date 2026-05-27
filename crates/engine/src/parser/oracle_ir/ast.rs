@@ -874,6 +874,8 @@ pub(crate) enum PutImperativeAst {
         /// having been declared as one). Set by the inline-tail patcher in
         /// `try_parse_put_zone_change` for the Kaalia / Ilharg class.
         enters_attacking: bool,
+        /// "Up to one" resolution-choice zone changes may move zero matching objects.
+        up_to: bool,
         /// CR 122.1 + CR 614.1c: Counters granted as the moved object enters
         /// (e.g., "with two additional +1/+1 counters on it"). Each entry is
         /// `(counter_type, count)`.
