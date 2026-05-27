@@ -8209,6 +8209,178 @@ mod tests {
         );
     }
 
+    /// CR 608.2c + CR 109.5 + CR 701.23a: Ghost Quarter shape — after a land
+    /// is destroyed, "its controller may search their library..." binds the
+    /// search and the Library -> Battlefield continuation to the destroyed
+    /// land's controller, not the ability controller. `ChangeZone { target:
+    /// Any }` is the continuation sentinel for the card selected by
+    /// SearchLibrary, so the selected object target must flow through the
+    /// pending continuation instead of scanning any player's library.
+    #[test]
+    fn parent_target_controller_search_puts_chosen_card_onto_that_players_battlefield() {
+        use crate::game::engine::apply;
+        use crate::types::ability::{EffectKind, SearchSelectionConstraint};
+
+        let mut state = GameState::new_two_player(42);
+
+        let destroyed_land = create_object(
+            &mut state,
+            CardId(50),
+            PlayerId(1),
+            "Destroyed Land".to_string(),
+            Zone::Graveyard,
+        );
+        state.objects.get_mut(&destroyed_land).unwrap().controller = PlayerId(1);
+
+        let p0_basic = create_object(
+            &mut state,
+            CardId(60),
+            PlayerId(0),
+            "Caster Forest".to_string(),
+            Zone::Library,
+        );
+        state
+            .objects
+            .get_mut(&p0_basic)
+            .unwrap()
+            .card_types
+            .core_types = vec![CoreType::Land];
+        state
+            .objects
+            .get_mut(&p0_basic)
+            .unwrap()
+            .card_types
+            .supertypes
+            .push(crate::types::card_type::Supertype::Basic);
+
+        let p1_basic = create_object(
+            &mut state,
+            CardId(61),
+            PlayerId(1),
+            "Opponent Plains".to_string(),
+            Zone::Library,
+        );
+        state
+            .objects
+            .get_mut(&p1_basic)
+            .unwrap()
+            .card_types
+            .core_types = vec![CoreType::Land];
+        state
+            .objects
+            .get_mut(&p1_basic)
+            .unwrap()
+            .card_types
+            .supertypes
+            .push(crate::types::card_type::Supertype::Basic);
+
+        let shuffle = ResolvedAbility::new(
+            Effect::Shuffle {
+                target: TargetFilter::ParentTargetController,
+            },
+            vec![],
+            ObjectId(9000),
+            PlayerId(0),
+        );
+        let put = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Library),
+                destination: Zone::Battlefield,
+                target: TargetFilter::Any,
+                owner_library: false,
+                enter_transformed: false,
+                under_your_control: false,
+                enter_tapped: false,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+            },
+            vec![],
+            ObjectId(9000),
+            PlayerId(0),
+        )
+        .sub_ability(shuffle);
+        let search = ResolvedAbility::new(
+            Effect::SearchLibrary {
+                filter: TargetFilter::Typed(TypedFilter::land().properties(vec![
+                    FilterProp::HasSupertype {
+                        value: crate::types::card_type::Supertype::Basic,
+                    },
+                ])),
+                count: QuantityExpr::Fixed { value: 1 },
+                reveal: false,
+                target_player: Some(TargetFilter::ParentTargetController),
+                selection_constraint: SearchSelectionConstraint::None,
+                split: None,
+            },
+            vec![TargetRef::Object(destroyed_land)],
+            ObjectId(9000),
+            PlayerId(0),
+        )
+        .sub_ability(put);
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &search, &mut events, 0).unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::SearchChoice { player, cards, .. } => {
+                assert_eq!(
+                    *player,
+                    PlayerId(1),
+                    "destroyed land's controller must receive the search prompt"
+                );
+                assert_eq!(
+                    cards,
+                    &vec![p1_basic],
+                    "search must inspect the destroyed land controller's library, not the caster's"
+                );
+            }
+            other => panic!("expected SearchChoice for destroyed land controller, got {other:?}"),
+        }
+
+        let result = apply(
+            &mut state,
+            PlayerId(1),
+            GameAction::SelectCards {
+                cards: vec![p1_basic],
+            },
+        )
+        .unwrap();
+        events.extend(result.events);
+
+        assert_eq!(
+            state.objects.get(&p1_basic).unwrap().zone,
+            Zone::Battlefield,
+            "chosen basic land must enter the battlefield"
+        );
+        assert_eq!(
+            state.objects.get(&p1_basic).unwrap().controller,
+            PlayerId(1),
+            "chosen basic land must remain under its owner's control"
+        );
+        assert_eq!(
+            state.objects.get(&p0_basic).unwrap().zone,
+            Zone::Library,
+            "caster's library must not be searched by the ParentTargetController continuation"
+        );
+        assert!(state
+            .players_who_searched_library_this_turn
+            .contains(&PlayerId(1)));
+        assert!(!state
+            .players_who_searched_library_this_turn
+            .contains(&PlayerId(0)));
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::Shuffle,
+                    ..
+                }
+            )),
+            "shuffle continuation must resolve for the searching player"
+        );
+    }
+
     /// CR 609.3 + CR 109.5: Direct unit test of the synchronous-continuation
     /// re-stash predicate inside `drain_pending_repeat_iteration`. Constructs
     /// a multi-iteration resume whose iterations install a `pending_continuation`
