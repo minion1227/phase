@@ -10764,6 +10764,66 @@ fn refine_damage_target_remainder(target: TargetFilter, remainder: &str) -> (Tar
     (target, remainder)
 }
 
+/// Split a post-"choose" clause into the card-description phrase and any trailing
+/// restriction suffix after `"from it"` (e.g. `"with mana value 2 or less"`).
+/// CR 702.148a: cleave brackets are removed at build time, so the suffix here is
+/// plain text — `combine_choose_filter_parts` merges it and relies on
+/// `parse_search_filter`'s self-bounding terminator to drop any trailing sentence.
+fn choose_filter_parts(text: &str) -> (&str, &str) {
+    if let Ok((_, (before, suffix))) = nom_primitives::split_once_on(text, " card from among those")
+    {
+        return (before.trim(), suffix.trim());
+    }
+    if let Ok((_, (before, suffix))) = nom_primitives::split_once_on(text, " card from among them")
+    {
+        return (before.trim(), suffix.trim());
+    }
+    if let Ok((_, (before, suffix))) = nom_primitives::split_once_on(text, " card from it") {
+        return (before.trim(), suffix.trim());
+    }
+    (text.trim(), "")
+}
+
+fn parse_choose_filter_leading_body(input: &str) -> &str {
+    type E<'a> = OracleError<'a>;
+    preceded(opt(alt((tag::<_, _, E>("a "), tag("an ")))), rest::<_, E>)
+        .parse(input.trim())
+        .map(|(_, body)| body.trim())
+        .unwrap_or(input.trim())
+}
+
+fn trailing_bare_article_only(input: &str) -> bool {
+    type E<'a> = OracleError<'a>;
+    opt(alt((
+        all_consuming(terminated(take_until::<_, _, E>(" an"), tag(" an"))),
+        all_consuming(terminated(take_until::<_, _, E>(" a"), tag(" a"))),
+    )))
+    .parse(input.trim())
+    .is_ok()
+}
+
+/// Merge the pre-`from it` card phrase with the plain trailing restriction
+/// suffix that follows `"card from it"` (e.g. `"with mana value 2 or less"`).
+///
+/// CR 702.148a: Cleave's bracketed text is removed at build time before this
+/// parse runs (the base parse sees the bracket *content* without the bracket
+/// characters; the cleave-cost parse sees it removed entirely). So the suffix
+/// here is plain text, not a bracketed span. The merged string is handed to
+/// `parse_search_filter`, whose `search_filter_region` self-bounds at the first
+/// `". "`/`"."`, so any trailing sentence (Dread Fugue's "That player discards
+/// that card.") is naturally dropped without bracket-specific extraction.
+fn combine_choose_filter_parts(filter_part: &str, suffix_part: &str) -> String {
+    let filter_part = parse_choose_filter_leading_body(filter_part);
+    let suffix = suffix_part.trim();
+    if suffix.is_empty() {
+        filter_part.to_string()
+    } else if filter_part.is_empty() {
+        suffix.to_string()
+    } else {
+        format!("{filter_part} {suffix}")
+    }
+}
+
 fn parse_choose_filter(lower: &str, ctx: &mut ParseContext) -> TargetFilter {
     // Extract type info between "choose" and "card from it"
     // Handle both "choose X" and "you choose X" forms
@@ -10784,17 +10844,22 @@ fn parse_choose_filter(lower: &str, ctx: &mut ParseContext) -> TargetFilter {
         return TargetFilter::ParentTarget;
     }
 
-    let before_card = after_choose.split("card").next().unwrap_or("");
-    let cleaned = before_card
-        .trim()
-        .trim_start_matches("a ")
-        .trim_start_matches("an ")
-        .trim();
+    let (filter_part, suffix_part) = choose_filter_parts(after_choose);
+    let combined = combine_choose_filter_parts(filter_part, suffix_part);
 
     // Intentional: bare article "a [card]" or empty string means any card — not a parse failure
-    if cleaned.is_empty() || cleaned == "a" {
+    if combined.is_empty() || combined == "a" {
         return TargetFilter::Any;
     }
+
+    // CR 202.3: Delegate full card restrictions (type + mana value bounds, etc.) to the
+    // shared search-filter parser — cleave bracket suffixes after "from it" are merged above.
+    let search_filter = parse_search_filter(&combined, ctx);
+    if !is_unrestricted_card_filter(&search_filter) {
+        return search_filter;
+    }
+
+    let cleaned = filter_part;
 
     // structural: not dispatch — segmenting pre-extracted type string on comma separator
     // Comma-separated negation: "noncreature, nonland" → intersection of negations
@@ -10954,6 +11019,60 @@ fn type_str_to_target_filter(s: &str) -> Option<TargetFilter> {
     None
 }
 
+/// True when a filter imposes no restriction beyond "any card" (including empty `Typed`).
+fn is_unrestricted_card_filter(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Any => true,
+        TargetFilter::Typed(tf) => {
+            tf.type_filters.is_empty() && tf.properties.is_empty() && tf.controller.is_none()
+        }
+        _ => false,
+    }
+}
+
+fn parse_article_type_phrase_suffix<'a>(
+    input: &'a str,
+) -> nom::IResult<&'a str, &'a str, OracleError<'a>> {
+    alt((
+        preceded(tag::<_, _, OracleError<'_>>(" an "), rest),
+        preceded(tag(" a "), rest),
+    ))
+    .parse(input)
+}
+
+/// Type phrase after the last article in text that precedes `"card from"` (e.g. `"nonland"`,
+/// `"creature with mana value 3 or less"`, or empty for bare `"a card from it"`).
+fn type_phrase_before_card_from(before_card: &str) -> &str {
+    let trimmed = before_card.trim();
+
+    if trailing_bare_article_only(trimmed) {
+        return "";
+    }
+
+    let mut last = trimmed;
+    let mut cursor = 0;
+    while cursor < trimmed.len() {
+        let slice = &trimmed[cursor..];
+        if let Some((_rel_before, phrase, _rest)) =
+            nom_primitives::scan_preceded(slice, parse_article_type_phrase_suffix)
+        {
+            last = phrase.trim();
+            cursor += 1;
+        } else {
+            break;
+        }
+    }
+    last
+}
+
+fn choose_filter_search_text(phrase: &str) -> String {
+    if nom_primitives::scan_contains(phrase, "card") {
+        phrase.to_string()
+    } else {
+        format!("{phrase} card")
+    }
+}
+
 /// Extract card type filter from a sub-ability sentence containing "card from it/among".
 /// Handles forms like "exile a nonland card from it", "discard a creature card from it".
 fn parse_choose_filter_from_sentence(lower: &str, ctx: &mut ParseContext) -> TargetFilter {
@@ -10971,11 +11090,19 @@ fn parse_choose_filter_from_sentence(lower: &str, ctx: &mut ParseContext) -> Tar
             return TargetFilter::Any;
         }
     };
-    // The word immediately before "card from" is the type descriptor
-    let word = before_card.trim().rsplit(' ').next().unwrap_or("");
-    if word.is_empty() || matches!(word, "a" | "an") {
+    // Use the full type phrase before "card from" (e.g. "nonland", "creature with mana
+    // value 3 or less"), not only the last word.
+    let phrase = type_phrase_before_card_from(before_card);
+    if phrase.is_empty() || phrase == "a" {
         return TargetFilter::Any;
     }
+    let search_text = choose_filter_search_text(phrase);
+    let filter = parse_search_filter(&search_text, ctx);
+    if !is_unrestricted_card_filter(&filter) {
+        return filter;
+    }
+    // Legacy single-word fallback for short descriptors ("nonland", "creature").
+    let word = phrase.rsplit(' ').next().unwrap_or(phrase);
     if let Some(negated) = word.strip_prefix("non") {
         if let Some(TargetFilter::Typed(tf)) = type_str_to_target_filter(negated) {
             if let Some(primary) = tf.get_primary_type().cloned() {
@@ -10988,7 +11115,7 @@ fn parse_choose_filter_from_sentence(lower: &str, ctx: &mut ParseContext) -> Tar
     type_str_to_target_filter(word).unwrap_or_else(|| {
         ctx.push_diagnostic(OracleDiagnostic::TargetFallback {
             context: "unrecognized choose-from-sentence type".into(),
-            text: word.into(),
+            text: phrase.into(),
             line_index: 0,
         });
         TargetFilter::Any
@@ -29491,6 +29618,44 @@ mod tests {
     }
 
     #[test]
+    fn dread_fugue_choose_from_revealed_hand_includes_cmc_leq_2() {
+        // CR 702.148a: Cleave's bracketed text is removed at build time, so the
+        // parser receives the bracket-stripped (KeepContent) base text — the
+        // brackets are gone, their inner restriction kept. This test exercises
+        // the base-mode retarget: the plain trailing "with mana value 2 or less"
+        // suffix after "card from it" must merge into the reveal-choice filter,
+        // with `parse_search_filter` self-bounding at the next sentence.
+        let def = parse_effect_chain(
+            "Target player reveals their hand. You choose a nonland card from it with mana value 2 or less. That player discards that card.",
+            AbilityKind::Spell,
+        );
+
+        fn reveal_hand_filter(def: &AbilityDefinition) -> Option<&TargetFilter> {
+            match def.effect.as_ref() {
+                Effect::RevealHand { card_filter, .. } => Some(card_filter),
+                _ => def.sub_ability.as_deref().and_then(reveal_hand_filter),
+            }
+        }
+
+        let card_filter = reveal_hand_filter(&def).expect("RevealHand in chain");
+        assert!(
+            matches!(
+                card_filter,
+                TargetFilter::Typed(tf)
+                    if tf.type_filters.iter().any(|t| matches!(t, TypeFilter::Non(inner) if **inner == TypeFilter::Land))
+                    && tf.properties.iter().any(|p| matches!(
+                        p,
+                        FilterProp::Cmc {
+                            comparator: Comparator::LE,
+                            value: QuantityExpr::Fixed { value: 2 }
+                        }
+                    ))
+            ),
+            "expected nonland + CMC<=2 reveal choice filter, got {card_filter:?}"
+        );
+    }
+
+    #[test]
     fn parse_optional_reveal_hand_choice_marks_choice_optional() {
         let def = parse_effect_chain(
             "Look at target player's hand. You may choose a nonland card from it. That player discards that card.",
@@ -30966,6 +31131,34 @@ mod tests {
             ctx.diagnostics.is_empty(),
             "bare card choice should not emit target fallback diagnostics: {:?}",
             ctx.diagnostics
+        );
+    }
+
+    #[test]
+    fn parse_choose_filter_merges_trailing_cmc_suffix() {
+        // CR 702.148a: Dread Fugue's base-mode (KeepContent) text — brackets
+        // removed at build time, inner restriction kept. The plain "with mana
+        // value 2 or less" suffix after "card from it" must merge into the
+        // filter, with the trailing "That player discards that card." sentence
+        // dropped by `parse_search_filter`'s self-bounding terminator.
+        let mut ctx = ParseContext::default();
+        let lower =
+            "you choose a nonland card from it with mana value 2 or less. that player discards that card.";
+        let filter = parse_choose_filter(lower, &mut ctx);
+        assert!(
+            matches!(
+                &filter,
+                TargetFilter::Typed(tf)
+                    if tf.type_filters.iter().any(|t| matches!(t, TypeFilter::Non(inner) if **inner == TypeFilter::Land))
+                    && tf.properties.iter().any(|p| matches!(
+                        p,
+                        FilterProp::Cmc {
+                            comparator: Comparator::LE,
+                            value: QuantityExpr::Fixed { value: 2 }
+                        }
+                    ))
+            ),
+            "expected nonland + CMC<=2, got {filter:?}"
         );
     }
 
