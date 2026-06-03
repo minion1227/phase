@@ -11912,6 +11912,27 @@ mod tests {
     }
 
     #[test]
+    fn trigger_your_commander_enters_or_attacks() {
+        let def = parse_trigger_line(
+            "Whenever your commander enters or attacks, put a page counter on ~.",
+            "Tome of Legends",
+        );
+        assert_eq!(def.mode, TriggerMode::EntersOrAttacks);
+        assert_eq!(
+            def.valid_card,
+            Some(TargetFilter::Typed(TypedFilter {
+                properties: vec![
+                    FilterProp::Owned {
+                        controller: ControllerRef::You,
+                    },
+                    FilterProp::IsCommander,
+                ],
+                ..Default::default()
+            }))
+        );
+    }
+
+    #[test]
     fn trigger_counter_put_on_self() {
         let def = parse_trigger_line(
             "Whenever a +1/+1 counter is put on ~, draw a card.",
