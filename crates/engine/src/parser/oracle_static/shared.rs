@@ -946,6 +946,10 @@ pub(crate) fn rebind_source_object_quantity_expr_to_recipient(expr: QuantityExpr
             inner: Box::new(rebind_source_object_quantity_expr_to_recipient(*inner)),
             offset,
         },
+        QuantityExpr::ClampMin { inner, minimum } => QuantityExpr::ClampMin {
+            inner: Box::new(rebind_source_object_quantity_expr_to_recipient(*inner)),
+            minimum,
+        },
         QuantityExpr::Multiply { inner, factor } => QuantityExpr::Multiply {
             inner: Box::new(rebind_source_object_quantity_expr_to_recipient(*inner)),
             factor,

@@ -55,6 +55,16 @@ pub struct CombatState {
     /// every defending player has declared blockers.
     #[serde(default)]
     pub pending_blocker_declaration_events: Vec<GameEvent>,
+    /// CR 508.6 + CR 702.121a: For each attacking player, the defending players
+    /// they attacked in this combat. Declaration history, not live attacker
+    /// membership, so Melee counts remain stable if attackers leave combat
+    /// before the trigger resolves.
+    #[serde(default)]
+    pub attacked_defenders_this_combat: HashMap<PlayerId, HashSet<PlayerId>>,
+    /// CR 508.6 + CR 702.121a: Source-specific current-combat counterpart to
+    /// `attacked_defenders_this_combat`.
+    #[serde(default)]
+    pub creature_attacked_defenders_this_combat: HashMap<ObjectId, HashSet<PlayerId>>,
     pub damage_assignments: HashMap<ObjectId, Vec<DamageAssignment>>,
     pub first_strike_done: bool,
     /// Index into attacker list for resumable damage assignment iteration.
@@ -72,6 +82,9 @@ impl PartialEq for CombatState {
             && self.blocker_to_attacker == other.blocker_to_attacker
             && self.blockers_declared_by == other.blockers_declared_by
             && self.pending_blocker_declaration_events == other.pending_blocker_declaration_events
+            && self.attacked_defenders_this_combat == other.attacked_defenders_this_combat
+            && self.creature_attacked_defenders_this_combat
+                == other.creature_attacked_defenders_this_combat
             && self.first_strike_done == other.first_strike_done
     }
 }
@@ -2009,6 +2022,22 @@ pub fn declare_attackers_with_bands(
         .iter()
         .map(|attacker| (attacker.object_id, attacker.defending_player))
         .collect();
+    combat.attacked_defenders_this_combat.clear();
+    combat.creature_attacked_defenders_this_combat.clear();
+    for (attacker_id, defending_player) in &creature_attacked_defenders {
+        if let Some(attacker) = state.objects.get(attacker_id) {
+            combat
+                .attacked_defenders_this_combat
+                .entry(attacker.controller)
+                .or_default()
+                .insert(*defending_player);
+        }
+        combat
+            .creature_attacked_defenders_this_combat
+            .entry(*attacker_id)
+            .or_default()
+            .insert(*defending_player);
+    }
 
     // Use the first attacker's defending player for the event
     let defending_player = combat

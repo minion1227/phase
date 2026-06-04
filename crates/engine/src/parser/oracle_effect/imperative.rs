@@ -712,6 +712,7 @@ fn extract_object_count_filter(expr: &QuantityExpr) -> Option<TargetFilter> {
         } => Some(filter.clone()),
         QuantityExpr::DivideRounded { inner, .. }
         | QuantityExpr::Multiply { inner, .. }
+        | QuantityExpr::ClampMin { inner, .. }
         | QuantityExpr::Offset { inner, .. } => extract_object_count_filter(inner),
         _ => None,
     }
@@ -6775,6 +6776,10 @@ fn rebind_costpaid_scope_to_recipient(expr: QuantityExpr) -> QuantityExpr {
         QuantityExpr::Offset { inner, offset } => QuantityExpr::Offset {
             inner: Box::new(rebind_costpaid_scope_to_recipient(*inner)),
             offset,
+        },
+        QuantityExpr::ClampMin { inner, minimum } => QuantityExpr::ClampMin {
+            inner: Box::new(rebind_costpaid_scope_to_recipient(*inner)),
+            minimum,
         },
         QuantityExpr::Multiply { factor, inner } => QuantityExpr::Multiply {
             factor,

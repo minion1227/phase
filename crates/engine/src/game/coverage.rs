@@ -8,11 +8,11 @@ use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::parser::oracle_util::SELF_REF_TYPE_PHRASES;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction,
-    AdditionalCost, AggregateFunction, CardTypeSetSource, ChoiceType, Comparator,
-    ContinuousModification, ControllerRef, CountScope, CounterSourceRider, DelayedTriggerCondition,
-    DieRollModifier, DoublePTMode, Duration, Effect, EffectOutcomeSignal, FilterProp,
-    GameRestriction, ManaProduction, ObjectProperty, ObjectScope, PlayerFilter, PlayerScope,
-    PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef, ReplacementCondition,
+    AdditionalCost, AggregateFunction, AttackScope, AttackSubject, CardTypeSetSource, ChoiceType,
+    Comparator, ContinuousModification, ControllerRef, CountScope, CounterSourceRider,
+    DelayedTriggerCondition, DieRollModifier, DoublePTMode, Duration, Effect, EffectOutcomeSignal,
+    FilterProp, GameRestriction, ManaProduction, ObjectProperty, ObjectScope, PlayerFilter,
+    PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef, ReplacementCondition,
     ReplacementDefinition, ReplacementMode, SeatDirection, SharedQuality, SharedQualityRelation,
     SpeedDelta, SpellCastingOption, SpellCastingOptionKind, StaticCondition, StaticDefinition,
     TargetFilter, TriggerDefinition, TypeFilter, TypedFilter, ZoneRef,
@@ -783,6 +783,9 @@ fn fmt_quantity(q: &QuantityExpr) -> String {
         QuantityExpr::Offset { inner, offset } => {
             format!("{}+{}", fmt_quantity(inner), offset)
         }
+        QuantityExpr::ClampMin { inner, minimum } => {
+            format!("max({}, {})", fmt_quantity(inner), minimum)
+        }
         QuantityExpr::Multiply { factor, inner } => {
             format!("{}*{}", factor, fmt_quantity(inner))
         }
@@ -1232,10 +1235,18 @@ fn fmt_player_filter(pf: &PlayerFilter) -> String {
         PlayerFilter::OpponentDealtCombatDamage { .. } => {
             "each opponent who was dealt combat damage this turn"
         }
-        PlayerFilter::OpponentAttackedThisTurn => "each opponent you attacked this turn",
-        PlayerFilter::OpponentAttackedBySourceThisTurn => {
-            "each opponent this source attacked this turn"
-        }
+        PlayerFilter::OpponentAttacked { subject, scope } => match (subject, scope) {
+            (AttackSubject::You, AttackScope::ThisTurn) => "each opponent you attacked this turn",
+            (AttackSubject::Source, AttackScope::ThisTurn) => {
+                "each opponent this source attacked this turn"
+            }
+            (AttackSubject::You, AttackScope::ThisCombat) => {
+                "each opponent you attacked this combat"
+            }
+            (AttackSubject::Source, AttackScope::ThisCombat) => {
+                "each opponent this source attacked this combat"
+            }
+        },
         PlayerFilter::All => "each player",
         PlayerFilter::HighestSpeed => "each player with the highest speed",
         PlayerFilter::ZoneChangedThisWay => "each player who changed a card this way",
@@ -5099,9 +5110,9 @@ fn extract_quantity_features(qty: &QuantityExpr, features: &mut HashMap<String, 
             let (name, support) = quantity_ref_feature(qref);
             features.insert(format!("quantity_ref:{name}"), support);
         }
-        QuantityExpr::Offset { inner, .. } | QuantityExpr::Multiply { inner, .. } => {
-            extract_quantity_features(inner, features);
-        }
+        QuantityExpr::Offset { inner, .. }
+        | QuantityExpr::ClampMin { inner, .. }
+        | QuantityExpr::Multiply { inner, .. } => extract_quantity_features(inner, features),
         QuantityExpr::DivideRounded { inner, .. } => {
             extract_quantity_features(inner, features);
         }
@@ -5381,10 +5392,7 @@ fn player_filter_feature(scope: &PlayerFilter) -> (&'static str, FeatureSupport)
         PlayerFilter::OpponentLostLife => ("OpponentLostLife", Handled),
         PlayerFilter::OpponentGainedLife => ("OpponentGainedLife", Handled),
         PlayerFilter::OpponentDealtCombatDamage { .. } => ("OpponentDealtCombatDamage", Handled),
-        PlayerFilter::OpponentAttackedThisTurn => ("OpponentAttackedThisTurn", Handled),
-        PlayerFilter::OpponentAttackedBySourceThisTurn => {
-            ("OpponentAttackedBySourceThisTurn", Handled)
-        }
+        PlayerFilter::OpponentAttacked { .. } => ("OpponentAttacked", Handled),
         PlayerFilter::HighestSpeed => ("HighestSpeed", Handled),
         // Previously emitted via Debug formatting; never appeared in the handled set.
         PlayerFilter::Controller => ("Controller", Unhandled),

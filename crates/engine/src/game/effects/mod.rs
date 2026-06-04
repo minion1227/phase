@@ -9,6 +9,8 @@ use crate::types::ability::{
     PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, RepeatContinuation, ResolvedAbility,
     SharedQuality, SharedQualityRelation, SubAbilityLink, TargetFilter, TargetRef,
 };
+#[cfg(test)]
+use crate::types::ability::{AttackScope, AttackSubject};
 use crate::types::events::{GameEvent, PlayerActionKind};
 use crate::types::game_state::{
     AutoMayChoice, CastOfferKind, ClauseMinimumSnapshot, DayNight, GameState, LKISnapshot,
@@ -233,14 +235,11 @@ pub(crate) fn matches_player_scope(
                             state, p.id, controller, source, source_id,
                         )
                     }
-                    // CR 508.6: opponent this player attacked this turn.
-                    PlayerFilter::OpponentAttackedThisTurn => {
-                        p.id != controller && state.has_attacked(controller, p.id)
-                    }
-                    // CR 508.6: opponent this source creature attacked this turn.
-                    PlayerFilter::OpponentAttackedBySourceThisTurn => {
+                    // CR 508.6: opponent the subject attacked within scope.
+                    PlayerFilter::OpponentAttacked { subject, scope } => {
                         p.id != controller
-                            && state.creature_attacked_player_this_turn(source_id, p.id)
+                            && state
+                                .opponent_attacked(*subject, *scope, controller, source_id, p.id)
                     }
                     PlayerFilter::HighestSpeed => {
                         let highest_speed = state
@@ -1287,6 +1286,7 @@ fn collect_clause_minimum_refs<'a>(expr: &'a QuantityExpr, out: &mut Vec<&'a Qua
         QuantityExpr::Fixed { .. } => {}
         QuantityExpr::DivideRounded { inner, .. }
         | QuantityExpr::Offset { inner, .. }
+        | QuantityExpr::ClampMin { inner, .. }
         | QuantityExpr::Multiply { inner, .. }
         | QuantityExpr::UpTo { max: inner }
         | QuantityExpr::Power {
@@ -2033,6 +2033,7 @@ fn quantity_expr_references_tracked_set(qty: &QuantityExpr) -> bool {
             )
         }
         QuantityExpr::Offset { inner, .. }
+        | QuantityExpr::ClampMin { inner, .. }
         | QuantityExpr::Multiply { inner, .. }
         | QuantityExpr::DivideRounded { inner, .. } => quantity_expr_references_tracked_set(inner),
         QuantityExpr::Sum { exprs } => exprs.iter().any(quantity_expr_references_tracked_set),
@@ -5116,8 +5117,7 @@ fn scoped_player_matches_filter(
         // game/triggers.rs:3703-3723).
         PlayerFilter::DefendingPlayer
         | PlayerFilter::OpponentDealtCombatDamage { .. }
-        | PlayerFilter::OpponentAttackedThisTurn
-        | PlayerFilter::OpponentAttackedBySourceThisTurn
+        | PlayerFilter::OpponentAttacked { .. }
         | PlayerFilter::HighestSpeed
         | PlayerFilter::ZoneChangedThisWay
         | PlayerFilter::PerformedActionThisWay { .. }
@@ -5487,7 +5487,10 @@ mod tests {
             matches_player_scope(
                 &state,
                 PlayerId(2),
-                &PlayerFilter::OpponentAttackedThisTurn,
+                &PlayerFilter::OpponentAttacked {
+                    subject: AttackSubject::You,
+                    scope: AttackScope::ThisTurn,
+                },
                 PlayerId(0),
                 angel,
             ),
@@ -5497,7 +5500,10 @@ mod tests {
             !matches_player_scope(
                 &state,
                 PlayerId(2),
-                &PlayerFilter::OpponentAttackedBySourceThisTurn,
+                &PlayerFilter::OpponentAttacked {
+                    subject: AttackSubject::Source,
+                    scope: AttackScope::ThisTurn,
+                },
                 PlayerId(0),
                 angel,
             ),
@@ -5507,7 +5513,10 @@ mod tests {
             matches_player_scope(
                 &state,
                 PlayerId(1),
-                &PlayerFilter::OpponentAttackedBySourceThisTurn,
+                &PlayerFilter::OpponentAttacked {
+                    subject: AttackSubject::Source,
+                    scope: AttackScope::ThisTurn,
+                },
                 PlayerId(0),
                 angel,
             ),

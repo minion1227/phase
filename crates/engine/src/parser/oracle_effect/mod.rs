@@ -94,6 +94,8 @@ use crate::types::ability::{
     StepSkipTarget, SubAbilityLink, TargetFilter, TargetSelectionMode, TriggerCondition,
     TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier, UntilCondition, ZoneOwner,
 };
+#[cfg(test)]
+use crate::types::ability::{AttackScope, AttackSubject};
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterType;
 use crate::types::game_state::{NextSpellModifier, RetargetScope};
@@ -10021,6 +10023,7 @@ fn rewrite_quantity_controller(expr: &mut QuantityExpr, from: ControllerRef, to:
         }
         QuantityExpr::DivideRounded { inner, .. }
         | QuantityExpr::Multiply { inner, .. }
+        | QuantityExpr::ClampMin { inner, .. }
         | QuantityExpr::Offset { inner, .. }
         | QuantityExpr::UpTo { max: inner }
         | QuantityExpr::Power {
@@ -10061,6 +10064,7 @@ fn rewrite_event_source_power_to_object_power(expr: &mut QuantityExpr, scope: Ob
         }
         QuantityExpr::DivideRounded { inner, .. }
         | QuantityExpr::Multiply { inner, .. }
+        | QuantityExpr::ClampMin { inner, .. }
         | QuantityExpr::Offset { inner, .. }
         | QuantityExpr::UpTo { max: inner }
         | QuantityExpr::Power {
@@ -12696,6 +12700,7 @@ fn rewrite_condition_quantity_expr(expr: &mut QuantityExpr) {
         },
         QuantityExpr::DivideRounded { inner, .. }
         | QuantityExpr::Multiply { inner, .. }
+        | QuantityExpr::ClampMin { inner, .. }
         | QuantityExpr::Offset { inner, .. } => rewrite_condition_quantity_expr(inner),
         QuantityExpr::Sum { exprs } => {
             for inner in exprs {
@@ -12790,6 +12795,7 @@ fn rewrite_player_scope_refs(def: &mut AbilityDefinition) {
             },
             QuantityExpr::DivideRounded { inner, .. }
             | QuantityExpr::Multiply { inner, .. }
+            | QuantityExpr::ClampMin { inner, .. }
             | QuantityExpr::Offset { inner, .. } => rewrite_quantity_expr(inner),
             QuantityExpr::Sum { exprs } => {
                 for inner in exprs {
@@ -12891,6 +12897,7 @@ pub(crate) fn rewrite_event_player_quantity_refs_to_scoped(def: &mut AbilityDefi
             },
             QuantityExpr::DivideRounded { inner, .. }
             | QuantityExpr::Multiply { inner, .. }
+            | QuantityExpr::ClampMin { inner, .. }
             | QuantityExpr::Offset { inner, .. } => rewrite_qty(inner),
             QuantityExpr::Sum { exprs } => {
                 for inner in exprs {
@@ -12947,6 +12954,7 @@ fn quantity_expr_references_controller_life_gained(expr: &QuantityExpr) -> bool 
                 },
         } => true,
         QuantityExpr::Offset { inner, .. }
+        | QuantityExpr::ClampMin { inner, .. }
         | QuantityExpr::Multiply { inner, .. }
         | QuantityExpr::DivideRounded { inner, .. }
         | QuantityExpr::UpTo { max: inner }
@@ -12987,6 +12995,7 @@ pub(crate) fn rewrite_gained_life_that_many_distribution_refs(def: &mut AbilityD
                 };
             }
             QuantityExpr::Offset { inner, .. }
+            | QuantityExpr::ClampMin { inner, .. }
             | QuantityExpr::Multiply { inner, .. }
             | QuantityExpr::DivideRounded { inner, .. }
             | QuantityExpr::UpTo { max: inner }
@@ -13040,9 +13049,9 @@ fn rewrite_rounding_mode(def: &mut AbilityDefinition, mode: RoundingMode) {
                 *rounding = mode;
                 rewrite_quantity_expr(inner, mode);
             }
-            QuantityExpr::Multiply { inner, .. } | QuantityExpr::Offset { inner, .. } => {
-                rewrite_quantity_expr(inner, mode);
-            }
+            QuantityExpr::Multiply { inner, .. }
+            | QuantityExpr::ClampMin { inner, .. }
+            | QuantityExpr::Offset { inner, .. } => rewrite_quantity_expr(inner, mode),
             QuantityExpr::Sum { exprs } => {
                 for inner in exprs {
                     rewrite_quantity_expr(inner, mode);
@@ -30491,7 +30500,7 @@ mod tests {
     }
 
     /// CR 508.6 + CR 104.3e: An "[source] attacked this turn" relative clause
-    /// narrows the player set to `OpponentAttackedBySourceThisTurn` (Angel of Destiny,
+    /// narrows the player set to `OpponentAttacked { Source, ThisTurn }` (Angel of Destiny,
     /// issue #1599). General over the predicate verb and over the self-ref
     /// spelling ("this creature" / "~" / "it"). The controller is excluded by
     /// the scope, so an attack trigger never eliminates its own controller.
@@ -30503,8 +30512,11 @@ mod tests {
                 let (scope, result) = strip_each_player_subject(&text);
                 assert_eq!(
                     scope,
-                    Some(PlayerFilter::OpponentAttackedBySourceThisTurn),
-                    "scope must narrow to OpponentAttackedBySourceThisTurn for {text:?}",
+                    Some(PlayerFilter::OpponentAttacked {
+                        subject: AttackSubject::Source,
+                        scope: AttackScope::ThisTurn,
+                    }),
+                    "scope must narrow to OpponentAttacked{{Source, ThisTurn}} for {text:?}",
                 );
                 assert_eq!(result, "lose the game", "predicate for {text:?}");
             }
@@ -30513,7 +30525,13 @@ mod tests {
         // General over the predicate verb (not just "loses the game").
         let (scope, result) =
             strip_each_player_subject("each player this creature attacked this turn loses 2 life");
-        assert_eq!(scope, Some(PlayerFilter::OpponentAttackedBySourceThisTurn));
+        assert_eq!(
+            scope,
+            Some(PlayerFilter::OpponentAttacked {
+                subject: AttackSubject::Source,
+                scope: AttackScope::ThisTurn,
+            })
+        );
         assert_eq!(result, "lose 2 life");
     }
 
@@ -33766,7 +33784,7 @@ mod tests {
     }
 
     #[test]
-    fn for_each_pump_beyond_first_offsets_quantity_before_scaling() {
+    fn for_each_pump_beyond_first_clamps_offset_quantity_before_scaling() {
         let def = parse_effect_chain(
             "~ gets -2/-1 until end of turn for each creature blocking it beyond the first",
             AbilityKind::Spell,
@@ -33781,14 +33799,26 @@ mod tests {
                     PtValue::Quantity(QuantityExpr::Multiply {
                         factor: -2,
                         inner,
-                    }) if matches!(inner.as_ref(), QuantityExpr::Offset { offset: -1, .. })
+                    }) if matches!(
+                        inner.as_ref(),
+                        QuantityExpr::ClampMin {
+                            inner,
+                            minimum: 0,
+                        } if matches!(inner.as_ref(), QuantityExpr::Offset { offset: -1, .. })
+                    )
                 ));
                 assert!(matches!(
                     toughness,
                     PtValue::Quantity(QuantityExpr::Multiply {
                         factor: -1,
                         inner,
-                    }) if matches!(inner.as_ref(), QuantityExpr::Offset { offset: -1, .. })
+                    }) if matches!(
+                        inner.as_ref(),
+                        QuantityExpr::ClampMin {
+                            inner,
+                            minimum: 0,
+                        } if matches!(inner.as_ref(), QuantityExpr::Offset { offset: -1, .. })
+                    )
                 ));
             }
             other => panic!("expected Pump, got {:?}", other),

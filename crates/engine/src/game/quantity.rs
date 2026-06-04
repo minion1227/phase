@@ -15,9 +15,10 @@ use crate::game::filter::{
 };
 use crate::game::speed::effective_speed;
 use crate::types::ability::{
-    AggregateFunction, CardTypeSetSource, CastManaObjectScope, CastManaSpentMetric, ControllerRef,
-    CountScope, FilterProp, ObjectProperty, ObjectScope, PlayerFilter, PlayerScope, QuantityExpr,
-    QuantityRef, ResolvedAbility, RoundingMode, TargetFilter, TargetRef, TypeFilter, ZoneRef,
+    AggregateFunction, AttackScope, CardTypeSetSource, CastManaObjectScope, CastManaSpentMetric,
+    ControllerRef, CountScope, FilterProp, ObjectProperty, ObjectScope, PlayerFilter, PlayerScope,
+    QuantityExpr, QuantityRef, ResolvedAbility, RoundingMode, TargetFilter, TargetRef, TypeFilter,
+    ZoneRef,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::{positive_counter_types, CounterType};
@@ -187,6 +188,7 @@ pub(crate) fn quantity_expr_uses_recipient(expr: &QuantityExpr) -> bool {
         },
         QuantityExpr::DivideRounded { inner, .. }
         | QuantityExpr::Offset { inner, .. }
+        | QuantityExpr::ClampMin { inner, .. }
         | QuantityExpr::Multiply { inner, .. } => quantity_expr_uses_recipient(inner),
         QuantityExpr::Sum { exprs } => exprs.iter().any(quantity_expr_uses_recipient),
         QuantityExpr::UpTo { max } => quantity_expr_uses_recipient(max),
@@ -219,6 +221,7 @@ pub(crate) fn quantity_expr_uses_object_count(expr: &QuantityExpr) -> bool {
         QuantityExpr::Ref { qty } => quantity_ref_uses_object_count(qty),
         QuantityExpr::DivideRounded { inner, .. }
         | QuantityExpr::Offset { inner, .. }
+        | QuantityExpr::ClampMin { inner, .. }
         | QuantityExpr::Multiply { inner, .. } => quantity_expr_uses_object_count(inner),
         QuantityExpr::Sum { exprs } => exprs.iter().any(quantity_expr_uses_object_count),
         QuantityExpr::UpTo { max } => quantity_expr_uses_object_count(max),
@@ -344,6 +347,7 @@ pub(crate) fn entered_object_perturbs_quantity_expr(
         QuantityExpr::Ref { qty } => entered_object_perturbs_quantity_ref(state, entered, ctx, qty),
         QuantityExpr::DivideRounded { inner, .. }
         | QuantityExpr::Offset { inner, .. }
+        | QuantityExpr::ClampMin { inner, .. }
         | QuantityExpr::Multiply { inner, .. } => {
             entered_object_perturbs_quantity_expr(state, entered, ctx, inner)
         }
@@ -557,6 +561,10 @@ fn fold_compose(expr: &QuantityExpr, recurse: impl Fn(&QuantityExpr) -> i32) -> 
             rounding,
         } => divide_rounded(recurse(inner), *divisor, *rounding),
         QuantityExpr::Offset { inner, offset } => recurse(inner) + offset,
+        // CR 107.1b: effect-result calculations that would be negative use zero
+        // instead. The lower bound is parameterized for non-zero floors, but
+        // current Oracle users are the zero-floor "beyond the first" class.
+        QuantityExpr::ClampMin { inner, minimum } => recurse(inner).max(*minimum),
         QuantityExpr::Multiply { factor, inner } => factor.saturating_mul(recurse(inner)),
         QuantityExpr::Sum { exprs } => exprs.iter().map(&recurse).sum(),
         // CR 107.3: `base ^ exponent` with the exponent resolved from a
@@ -3286,6 +3294,19 @@ pub(crate) fn resolve_player_count(
     controller: PlayerId,
     source_id: ObjectId,
 ) -> i32 {
+    if let PlayerFilter::OpponentAttacked {
+        subject,
+        scope: AttackScope::ThisCombat,
+    } = filter
+    {
+        return usize_to_i32_saturating(
+            state
+                .attacked_defenders_this_combat_for(*subject, controller, source_id)
+                .map(|defenders| defenders.iter().filter(|pid| **pid != controller).count())
+                .unwrap_or(0),
+        );
+    }
+
     usize_to_i32_saturating(
         state
             .players
@@ -3320,14 +3341,12 @@ pub(crate) fn resolve_player_count(
                                 state, p.id, controller, source, source_id,
                             )
                         }
-                        // CR 508.6: opponent this player attacked this turn.
-                        PlayerFilter::OpponentAttackedThisTurn => {
-                            p.id != controller && state.has_attacked(controller, p.id)
-                        }
-                        // CR 508.6: opponent this source creature attacked this turn.
-                        PlayerFilter::OpponentAttackedBySourceThisTurn => {
+                        // CR 508.6: opponent the subject attacked within scope.
+                        PlayerFilter::OpponentAttacked { subject, scope } => {
                             p.id != controller
-                                && state.creature_attacked_player_this_turn(source_id, p.id)
+                                && state.opponent_attacked(
+                                    *subject, *scope, controller, source_id, p.id,
+                                )
                         }
                         PlayerFilter::All => true,
                         PlayerFilter::HighestSpeed => {
@@ -8656,6 +8675,21 @@ mod tests {
             exponent: Box::new(QuantityExpr::Fixed { value: -3 }),
         };
         assert_eq!(resolve_quantity(&state, &neg, PlayerId(0), ObjectId(1)), 1);
+    }
+
+    /// CR 107.1b: A negative effect-result calculation uses zero instead.
+    #[test]
+    fn resolve_clamp_min_floors_negative_quantity_result() {
+        let state = GameState::new_two_player(42);
+        let expr = QuantityExpr::ClampMin {
+            inner: Box::new(QuantityExpr::Offset {
+                inner: Box::new(QuantityExpr::Fixed { value: 0 }),
+                offset: -1,
+            }),
+            minimum: 0,
+        };
+
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)), 0);
     }
 
     /// CR 603.4 + CR 109.3: The `Aggregate` resolver must exclude the

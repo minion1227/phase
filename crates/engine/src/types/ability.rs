@@ -3502,6 +3502,25 @@ pub enum PlayerRelation {
     All,
 }
 
+/// CR 506.2 + CR 508.1b: Whose attacks the "opponents attacked" player set is
+/// measured over.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AttackSubject {
+    /// The ability's controller — "opponents you attacked".
+    You,
+    /// The ability's source creature — "opponents this creature attacked".
+    Source,
+}
+
+/// CR 508.6: The time window over which "attacked [a player]" is measured.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AttackScope {
+    /// Across the whole turn, accumulated over every combat (CR 508.5).
+    ThisTurn,
+    /// Within the current combat only (CR 702.121a Melee).
+    ThisCombat,
+}
+
 /// A filter matching players by game-state conditions.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -3531,17 +3550,20 @@ pub enum PlayerFilter {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         source: Option<Box<TargetFilter>>,
     },
-    /// CR 508.6: A player has "attacked [a player]" if they declared one or more
-    /// creatures attacking that player. Each opponent the controller attacked this
-    /// turn, resolved against `state.attacked_defenders_this_turn[controller]`.
-    /// Used by "the number of opponents you attacked this turn" (Militant Angel).
-    /// (CR 508.1b: declare-attackers announcement; CR 506.2: active = attacking player.)
-    OpponentAttackedThisTurn,
-    /// CR 508.6: Each opponent the ability's source creature attacked this turn.
-    /// Uses `state.creature_attacked_defenders_this_turn[source_id]` for
-    /// source-specific text like "each player this creature attacked this turn"
-    /// (Angel of Destiny).
-    OpponentAttackedBySourceThisTurn,
+    /// CR 508.6: Each opponent that `subject` attacked (declared one or more
+    /// creatures attacking, per CR 508.1b; CR 508.5 resolves planeswalker/battle
+    /// attacks to the controller/protector) within `scope`. Resolved via
+    /// `GameState::opponent_attacked`: turn scope reads
+    /// `attacked_defenders_this_turn` / `creature_attacked_defenders_this_turn`;
+    /// combat scope reads the current combat's declaration ledgers.
+    ///
+    /// Subsumes the former `OpponentAttackedThisTurn` (`subject: You` — Militant
+    /// Angel) and `OpponentAttackedBySourceThisTurn` (`subject: Source` — Angel of
+    /// Destiny), and adds the combat-scoped form used by Melee (CR 702.121a).
+    OpponentAttacked {
+        subject: AttackSubject,
+        scope: AttackScope,
+    },
     /// All players.
     All,
     /// CR 702.179f: Each player whose speed is tied for the highest speed among players.
@@ -3673,6 +3695,15 @@ pub enum QuantityExpr {
         inner: Box<QuantityExpr>,
         offset: i32,
     },
+    /// CR 107.1b: If a calculation that determines an effect result would be
+    /// negative, zero is used instead. Generalized as a lower-bound clamp so
+    /// phrases like "for each [object] beyond the first" can compose
+    /// `ObjectCount - 1` without producing a negative count when the live set
+    /// has shrunk before resolution.
+    ClampMin {
+        inner: Box<QuantityExpr>,
+        minimum: i32,
+    },
     /// "Twice the number of X" / "N times X" / negation via factor: -1.
     Multiply {
         factor: i32,
@@ -3768,6 +3799,7 @@ impl QuantityExpr {
                 qty: QuantityRef::Variable { name },
             } => name == "X",
             QuantityExpr::Offset { inner, .. }
+            | QuantityExpr::ClampMin { inner, .. }
             | QuantityExpr::Multiply { inner, .. }
             | QuantityExpr::DivideRounded { inner, .. }
             | QuantityExpr::UpTo { max: inner }
