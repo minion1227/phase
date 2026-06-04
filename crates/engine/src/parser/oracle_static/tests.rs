@@ -631,6 +631,24 @@ fn static_rancor() {
 }
 
 #[test]
+fn static_archetype_cant_have_keyword() {
+    // CR 613.1f + CR 702: Theros Archetype cycle / Arcane Lighthouse —
+    // "... can't have or gain [keyword]" must emit a Layer 6 CantHaveKeyword denial
+    // static (scoped to the same subject) alongside the keyword removal.
+    let defs = parse_static_line_multi(
+        "Creatures your opponents control lose flying and can't have or gain flying.",
+    );
+    assert!(
+        defs.iter().any(|d| matches!(
+            &d.mode,
+            StaticMode::CantHaveKeyword { keyword } if *keyword == Keyword::Flying
+        )),
+        "expected a CantHaveKeyword(Flying) denial static, got modes {:?}",
+        defs.iter().map(|d| &d.mode).collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn static_cant_be_blocked_by_power_le() {
     // CR 509.1b: Questing Beast — can't be blocked by creatures with power 2 or less
     let def =
