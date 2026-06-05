@@ -24544,6 +24544,46 @@ mod tests {
     // `apply_where_x_effect_expression` → `apply_where_x_quantity_expression`
     // UpTo recursion that routes the where-clause through the shared
     // `ControlsCount` quantity combinator.
+    /// Issue #1965 — Eldritch Evolution: "creature card with mana value X or
+    /// less, where X is 2 plus the sacrificed creature's mana value" must bind
+    /// the search filter's `Cmc` bound to the cost-paid sacrifice, not leave
+    /// `Variable("X")` (which resolves to 0 and skips the search).
+    #[test]
+    fn eldritch_evolution_search_binds_sacrificed_creature_mana_value_plus_two() {
+        let def = parse_effect_chain_with_context(
+            "Search your library for a creature card with mana value X or less, where X is 2 plus the sacrificed creature's mana value. Put that card onto the battlefield, then shuffle. Exile Eldritch Evolution.",
+            AbilityKind::Spell,
+            &mut ParseContext::default(),
+        );
+        let Effect::SearchLibrary { filter, .. } = &*def.effect else {
+            panic!("expected SearchLibrary, got {:?}", def.effect);
+        };
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("expected typed filter, got {filter:?}");
+        };
+        assert!(typed.type_filters.contains(&TypeFilter::Creature));
+        let cmc = typed
+            .properties
+            .iter()
+            .find_map(|p| match p {
+                FilterProp::Cmc { comparator, value } => Some((comparator, value)),
+                _ => None,
+            })
+            .expect("expected Cmc bound");
+        assert_eq!(*cmc.0, Comparator::LE);
+        assert_eq!(
+            *cmc.1,
+            QuantityExpr::Offset {
+                inner: Box::new(QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectManaValue {
+                        scope: ObjectScope::CostPaidObject,
+                    },
+                }),
+                offset: 2,
+            }
+        );
+    }
+
     #[test]
     fn search_up_to_x_where_x_is_players_who_control_more_lands_binds_controls_count() {
         use crate::types::ability::PlayerRelation;
