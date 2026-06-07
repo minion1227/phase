@@ -1244,7 +1244,7 @@ fn check_token_cease_to_exist(state: &mut GameState, any_performed: &mut bool) {
     )> = state
         .objects
         .iter()
-        .filter(|(_, obj)| obj.is_token && obj.zone != Zone::Battlefield && obj.zone != Zone::Stack)
+        .filter(|(_, obj)| zones::token_is_outside_battlefield_and_stack(obj))
         .map(|(id, obj)| (*id, obj.zone, obj.owner))
         .collect();
 
