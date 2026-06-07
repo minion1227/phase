@@ -1476,6 +1476,9 @@ impl GameRunner {
                 crate::types::game_state::AlternativeCastKeyword::Blitz => {
                     "AlternativeCastChoice(Blitz)"
                 }
+                crate::types::game_state::AlternativeCastKeyword::Spectacle => {
+                    "AlternativeCastChoice(Spectacle)"
+                }
                 crate::types::game_state::AlternativeCastKeyword::Overload => {
                     "AlternativeCastChoice(Overload)"
                 }

@@ -627,6 +627,16 @@ fn has_disturb_keyword(state: &GameState, object_id: ObjectId) -> bool {
     super::keywords::object_has_effective_keyword_kind(state, object_id, KeywordKind::Disturb)
 }
 
+/// CR 702.137a: Spectacle's gate — whether any opponent of `caster` lost life
+/// this turn. Mirrors the existing `LifeLostThisTurn`/"an opponent lost life"
+/// predicate (see `game/quantity.rs`) so no new state tracking is introduced.
+fn an_opponent_lost_life_this_turn(state: &GameState, caster: PlayerId) -> bool {
+    state
+        .players
+        .iter()
+        .any(|p| p.id != caster && p.life_lost_this_turn > 0)
+}
+
 fn foretell_cost(obj: &crate::game::game_object::GameObject) -> Option<ManaCost> {
     obj.keywords.iter().find_map(|keyword| match keyword {
         Keyword::Foretell(cost) => Some(cost.clone()),
@@ -2640,6 +2650,19 @@ fn casting_variant_candidates(
         candidates.push(CastingVariant::Blitz);
     }
 
+    // CR 702.137a: Spectacle is an opt-in alternative cost from hand, available
+    // only if an opponent lost life this turn (a static ability functioning on
+    // the stack). Surface the candidate only while that condition holds.
+    if obj.zone == Zone::Hand
+        && obj
+            .keywords
+            .iter()
+            .any(|k| matches!(k, crate::types::keywords::Keyword::Spectacle(_)))
+        && an_opponent_lost_life_this_turn(state, player)
+    {
+        candidates.push(CastingVariant::Spectacle);
+    }
+
     // CR 702.102a: Fuse is a static ability on split cards that applies while
     // the card is in a player's hand. It lets the caster cast both halves as a
     // fused split spell. Only offered when the back face is the right (Split)
@@ -2885,6 +2908,18 @@ fn prepare_spell_cast_with_variant_override_inner(
     let blitz_cost = if obj.zone == Zone::Hand {
         obj.keywords.iter().find_map(|k| match k {
             crate::types::keywords::Keyword::Blitz(cost) => Some(cost.clone()),
+            _ => None,
+        })
+    } else {
+        None
+    };
+
+    // CR 702.137a: Spectacle — when casting from hand with Keyword::Spectacle, the
+    // spectacle mana cost replaces the printed cost (opt-in via `variant_override`,
+    // gated on an opponent having lost life this turn at offer time).
+    let spectacle_cost = if obj.zone == Zone::Hand {
+        obj.keywords.iter().find_map(|k| match k {
+            crate::types::keywords::Keyword::Spectacle(cost) => Some(cost.clone()),
             _ => None,
         })
     } else {
@@ -3374,6 +3409,12 @@ fn prepare_spell_cast_with_variant_override_inner(
     } else {
         None
     };
+    // CR 702.137a: substitute the spectacle mana cost only on the spectacle path.
+    let effective_spectacle_cost_for_path = if casting_variant == CastingVariant::Spectacle {
+        spectacle_cost
+    } else {
+        None
+    };
     let effective_escape_cost_for_path = if casting_variant == CastingVariant::Escape {
         escape_cost
     } else {
@@ -3436,6 +3477,7 @@ fn prepare_spell_cast_with_variant_override_inner(
             .or(effective_warp_cost_for_path)
             .or(effective_dash_cost_for_path)
             .or(effective_blitz_cost_for_path)
+            .or(effective_spectacle_cost_for_path)
             .or(freerunning_cost)
             .or(prowl_cost)
             .or(surge_cost)
@@ -5876,6 +5918,39 @@ pub fn handle_blitz_cost_choice_with_payment_mode(
     continue_cast_from_prepared(state, player, object_id, payment_mode, events)
 }
 
+/// CR 702.137a: Resolve the player's Spectacle cost choice. Mirrors
+/// `handle_blitz_cost_choice_with_payment_mode` — `Alternative` opts into
+/// `CastingVariant::Spectacle` (which substitutes the spectacle mana cost), and
+/// `Normal` casts for the printed cost. Spectacle has no resolution riders; it
+/// only changes how the cost is paid (CR 702.137a). The opponent-lost-life gate
+/// is enforced at offer time, so reaching this handler means the option was legal.
+pub fn handle_spectacle_cost_choice_with_payment_mode(
+    state: &mut GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    _card_id: CardId,
+    decision: crate::types::actions::AlternativeCastDecision,
+    payment_mode: CastPaymentMode,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    use crate::types::actions::AlternativeCastDecision;
+    let alt_path = match decision {
+        AlternativeCastDecision::Alternative => true,
+        AlternativeCastDecision::Normal => false,
+    };
+    if alt_path {
+        let mut prepared = prepare_spell_cast_with_variant_override(
+            state,
+            player,
+            object_id,
+            Some(CastingVariant::Spectacle),
+        )?;
+        prepared.payment_mode = payment_mode;
+        return continue_with_prepared(state, player, prepared, events);
+    }
+    continue_cast_from_prepared(state, player, object_id, payment_mode, events)
+}
+
 /// Shared continuation: call prepare_spell_cast and run the standard casting
 /// pipeline (modal → targeting → payment). Extracted so handle_warp_cost_choice
 /// and handle_cast_spell can share the same post-prepare logic.
@@ -6992,6 +7067,57 @@ pub fn handle_cast_spell_with_payment_mode(
                 }
                 if !normal_affordable && blitz_affordable {
                     return handle_blitz_cost_choice_with_payment_mode(
+                        state,
+                        player,
+                        object_id,
+                        card_id,
+                        crate::types::actions::AlternativeCastDecision::Alternative,
+                        payment_mode,
+                        events,
+                    );
+                }
+                // Otherwise (normal-only or neither): fall through to normal cast.
+            }
+        }
+    }
+
+    // CR 702.137a + CR 118.9: Spectacle — opt-in pure-mana alternative cost,
+    // available only if an opponent lost life this turn. When the gate holds and
+    // both the printed and spectacle costs are affordable, present the choice;
+    // auto-route when only the spectacle cost is payable. Mirrors the Blitz
+    // opt-in flow (spectacle has no resolution riders).
+    if let Some(obj) = state.objects.get(&object_id) {
+        if obj.zone == Zone::Hand && an_opponent_lost_life_this_turn(state, player) {
+            if let Some(spectacle_cost) = obj.keywords.iter().find_map(|k| match k {
+                crate::types::keywords::Keyword::Spectacle(cost) => Some(cost.clone()),
+                _ => None,
+            }) {
+                // CR 601.2f: affordability and displayed costs reflect active
+                // cost modifiers, applied to both the printed and spectacle costs.
+                let normal_cost =
+                    apply_cost_modifiers_to_base(state, player, object_id, obj.mana_cost.clone())
+                        .unwrap_or_else(|| obj.mana_cost.clone());
+                let spectacle_eff =
+                    apply_cost_modifiers_to_base(state, player, object_id, spectacle_cost.clone())
+                        .unwrap_or(spectacle_cost);
+                let normal_affordable =
+                    can_pay_cost_after_auto_tap(state, player, object_id, &normal_cost);
+                let spectacle_affordable =
+                    can_pay_cost_after_auto_tap(state, player, object_id, &spectacle_eff);
+                if normal_affordable && spectacle_affordable {
+                    return Ok(WaitingFor::AlternativeCastChoice {
+                        player,
+                        object_id,
+                        card_id,
+                        payment_mode,
+                        keyword: crate::types::game_state::AlternativeCastKeyword::Spectacle,
+                        normal_cost,
+                        alternative_cost: Some(spectacle_eff),
+                        alternative_additional_cost: None,
+                    });
+                }
+                if !normal_affordable && spectacle_affordable {
+                    return handle_spectacle_cost_choice_with_payment_mode(
                         state,
                         player,
                         object_id,
@@ -21820,6 +21946,108 @@ mod tests {
         assert!(
             state.delayed_triggers.iter().any(|d| d.source_id == spell),
             "blitz creature must have a scheduled next-end-step sacrifice"
+        );
+    }
+
+    /// CR 702.137a: Spectacle's gate — the alternative-cost option is offered
+    /// only if an opponent lost life this turn. With both the printed and
+    /// spectacle costs affordable, the Spectacle variant must be absent before any
+    /// opponent has lost life and present once one has.
+    #[test]
+    fn spectacle_offered_only_when_opponent_lost_life() {
+        use crate::types::keywords::Keyword;
+
+        let mut state = setup_game_at_main_phase();
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 3);
+
+        let spell = create_object(
+            &mut state,
+            CardId(9401),
+            PlayerId(0),
+            "Skewer the Critics".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&spell).unwrap();
+            obj.card_types.core_types.push(CoreType::Sorcery);
+            obj.base_card_types.core_types.push(CoreType::Sorcery);
+            obj.mana_cost = ManaCost::generic(3);
+            obj.base_mana_cost = ManaCost::generic(3);
+            obj.keywords.push(Keyword::Spectacle(ManaCost::generic(1)));
+        }
+
+        // No opponent has lost life this turn ⇒ Spectacle is not offered.
+        let choices = casting_variant_choice_set(&state, PlayerId(0), spell);
+        assert!(
+            !choices
+                .options
+                .iter()
+                .any(|o| o.variant == CastingVariant::Spectacle),
+            "Spectacle must not be offered before an opponent loses life; got {:?}",
+            choices.options
+        );
+
+        // An opponent loses life this turn ⇒ Spectacle becomes available.
+        state.players[1].life_lost_this_turn = 2;
+        let choices = casting_variant_choice_set(&state, PlayerId(0), spell);
+        assert!(
+            choices
+                .options
+                .iter()
+                .any(|o| o.variant == CastingVariant::Spectacle),
+            "Spectacle must be offered once an opponent lost life; got {:?}",
+            choices.options
+        );
+    }
+
+    /// CR 702.137a: End-to-end — with an opponent having lost life and only the
+    /// spectacle cost affordable (printed cost is not), casting auto-routes to the
+    /// spectacle alternative cost and the spell reaches the stack. That it casts
+    /// at all with only {1} available (printed is {3}) proves the spectacle cost
+    /// was substituted.
+    #[test]
+    fn spectacle_full_cast_pays_spectacle_cost() {
+        use super::super::engine::apply_as_current;
+        use crate::types::keywords::Keyword;
+
+        let mut state = setup_game_at_main_phase();
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 1);
+
+        let spell = create_object(
+            &mut state,
+            CardId(9402),
+            PlayerId(0),
+            "Light Up the Stage".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&spell).unwrap();
+            obj.card_types.core_types.push(CoreType::Sorcery);
+            obj.base_card_types.core_types.push(CoreType::Sorcery);
+            obj.mana_cost = ManaCost::generic(3);
+            obj.base_mana_cost = ManaCost::generic(3);
+            obj.keywords.push(Keyword::Spectacle(ManaCost::generic(1)));
+        }
+        // Gate open: an opponent lost life this turn.
+        state.players[1].life_lost_this_turn = 2;
+
+        apply_as_current(
+            &mut state,
+            GameAction::CastSpell {
+                object_id: spell,
+                card_id: CardId(9402),
+                targets: vec![],
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            state.stack.len(),
+            1,
+            "spell cast for its spectacle cost is on the stack (printed {{3}} was unaffordable)"
+        );
+        assert!(
+            !state.players[0].hand.contains(&spell),
+            "the cast spell left the caster's hand"
         );
     }
 

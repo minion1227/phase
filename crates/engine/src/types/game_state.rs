@@ -2021,6 +2021,10 @@ pub enum AlternativeCastKeyword {
     /// (CR 702.140a); on resolution it merges with that creature (CR 730) rather
     /// than entering the battlefield, unless the target is illegal (CR 702.140b).
     Mutate,
+    /// CR 702.137a: Spectacle alternative cost paid from hand, available only if
+    /// an opponent lost life this turn. A pure cost substitution — the spell
+    /// resolves normally (no riders); spectacle changes only how the cost is paid.
+    Spectacle,
 }
 
 /// CR 601.2b: Engine-authored cast-variant option for spells with more than
@@ -4293,6 +4297,10 @@ pub enum CastingVariant {
     /// `blitz::install_blitz_riders` grants the permanent haste and a dies-draw
     /// trigger and schedules a next-end-step sacrifice.
     Blitz,
+    /// CR 702.137a: Cast from hand via Spectacle's alternative cost, available
+    /// only if an opponent lost life this turn. A pure cost substitution — the
+    /// spell resolves normally with no resolution riders.
+    Spectacle,
     /// CR 702.62a: Cast from exile via Suspend's "play it without paying its
     /// mana cost" trigger after the last time counter was removed. On resolution
     /// of the resulting permanent, the stack handler tags
@@ -4450,6 +4458,7 @@ impl CastingVariant {
             | CastingVariant::Emerge
             | CastingVariant::Dash
             | CastingVariant::Blitz
+            | CastingVariant::Spectacle
             | CastingVariant::Suspend
             | CastingVariant::Plot
             | CastingVariant::Foretell
