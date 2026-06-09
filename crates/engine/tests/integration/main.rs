@@ -84,6 +84,7 @@ mod integration_bending;
 mod integration_landfall;
 mod invoke_calamity_free_cast;
 mod issue_1308_unstoppable_plan;
+mod issue_1312_prepared_spell_cast_triggers;
 mod issue_1509_sorcery_main_phase_cast;
 mod issue_1961_joel_token_dies;
 mod issue_1963_lotleth_troll;
