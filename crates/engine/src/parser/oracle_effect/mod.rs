@@ -21531,6 +21531,29 @@ mod tests {
     }
 
     #[test]
+    fn effect_pump_creatures_attacking_opponents_and_planeswalkers() {
+        let e = parse_effect(
+            "creatures attacking your opponents and/or planeswalkers they control get +2/+0 until end of turn",
+        );
+        let Effect::PumpAll {
+            target,
+            power,
+            toughness,
+        } = e
+        else {
+            panic!("expected Pump, got {e:?}");
+        };
+        let TargetFilter::Typed(typed) = target else {
+            panic!("expected typed target, got {target:?}");
+        };
+        assert!(typed.properties.contains(&FilterProp::Attacking {
+            defender: Some(ControllerRef::Opponent),
+        }));
+        assert_eq!(power, PtValue::Fixed(2));
+        assert_eq!(toughness, PtValue::Fixed(0));
+    }
+
+    #[test]
     fn effect_counterspell() {
         let e = parse_effect("Counter target spell");
         assert!(matches!(
