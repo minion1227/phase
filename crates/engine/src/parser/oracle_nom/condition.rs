@@ -5714,6 +5714,16 @@ pub(crate) fn parse_reflexive_conditional_connector(
     .parse(input)
 }
 
+/// CR 603.12: Match "when you do" + optional trailing ", ". Used by the
+/// triggered-modal splitter to detect a reflexive optional-cost header
+/// ("When you do, choose ...") so it can divert that text into the reflexive
+/// effect-chain path instead of attaching the modal directly to the trigger.
+pub(crate) fn match_when_you_do(i: &str) -> OracleResult<'_, ()> {
+    let (i, _) = tag("when you do").parse(i)?;
+    let (i, _) = opt(tag(", ")).parse(i)?;
+    Ok((i, ()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

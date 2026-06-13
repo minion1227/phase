@@ -110,6 +110,12 @@ pub fn build_resolved_from_def_with_targets(
     // CR 608.2c: Carry the parent-link kind through so the decline classifier can
     // distinguish a separate-sentence sibling from a within-clause continuation.
     resolved.sub_link = def.sub_link;
+    // CR 700.2b + CR 603.3c: Carry the reflexive modal choice + per-mode abilities
+    // through so try_begin_reflexive_target_selection can route a gated modal
+    // trigger (Caesar) to AbilityModeChoice instead of resolving the modes
+    // unconditionally.
+    resolved.modal = def.modal.clone();
+    resolved.mode_abilities = def.mode_abilities.clone();
     resolved
 }
 

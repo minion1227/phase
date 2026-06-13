@@ -1094,6 +1094,69 @@ fn try_begin_reflexive_target_selection(
     if !reflexive.targets.is_empty() {
         return Ok(false);
     }
+
+    // CR 700.2b + CR 603.3c: A reflexive MODAL trigger (Caesar, Legion's
+    // Emperor) chooses its mode(s) when it is put on the stack — after the
+    // optional cost was paid. Its own effect is a target-less modal marker, so
+    // the generic target-slot path below would early-return and resolve the
+    // modes unconditionally. Instead, push the reflexive ability as its own
+    // pending trigger carrying the modal + per-mode abilities, then defer to the
+    // shared modal-trigger router, which prompts `WaitingFor::AbilityModeChoice`
+    // and only then collects each chosen mode's targets.
+    if reflexive.modal.is_some() && !reflexive.mode_abilities.is_empty() {
+        let mut reflexive_clone = reflexive.clone();
+        if let Some(parent) = parent {
+            apply_parent_chain_context(&mut reflexive_clone, parent, effect_context_object);
+        }
+        let trigger_description = reflexive_clone
+            .description
+            .clone()
+            .or_else(|| parent.and_then(|p| p.description.clone()));
+        let source_id = parent.map(|p| p.source_id).unwrap_or(reflexive.source_id);
+        let controller = parent.map(|p| p.controller).unwrap_or(reflexive.controller);
+
+        let pending = crate::game::triggers::PendingTrigger {
+            source_id,
+            controller,
+            condition: None,
+            ability: reflexive_clone,
+            timestamp: state.turn_number,
+            target_constraints: reflexive.target_constraints.clone(),
+            distribute: None,
+            trigger_event: state.current_trigger_event.clone(),
+            modal: reflexive.modal.clone(),
+            mode_abilities: reflexive.mode_abilities.clone(),
+            description: trigger_description,
+            may_trigger_origin: None,
+            subject_match_count: None,
+            die_result: state.die_result_this_resolution,
+        };
+        let trigger_events =
+            crate::game::triggers::take_pending_trigger_event_batch(state, &pending);
+        let pending_for_state = pending.clone();
+        let entry_id = crate::game::triggers::push_pending_trigger_to_stack_with_event_batch(
+            state,
+            pending,
+            trigger_events,
+            events,
+        );
+        state.pending_trigger = Some(pending_for_state);
+        state.pending_trigger_entry = Some(entry_id);
+
+        match crate::game::engine::begin_pending_trigger_target_selection(state)
+            .map_err(|e| EffectError::InvalidParam(e.to_string()))?
+        {
+            Some(wf) => {
+                state.waiting_for = wf;
+                return Ok(true);
+            }
+            // CR 700.2b: all modes illegal -> the ability can't be put on the
+            // stack; the router already cleaned up the pushed entry. Do NOT fall
+            // through (that would dangle a cleared pending_trigger). Return done.
+            None => return Ok(true),
+        }
+    }
+
     let target_slots = crate::game::ability_utils::build_target_slots(state, reflexive)
         .map_err(|e| EffectError::InvalidParam(e.to_string()))?;
     if target_slots.is_empty() {

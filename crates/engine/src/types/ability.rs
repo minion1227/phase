@@ -14408,6 +14408,15 @@ pub struct ResolvedAbility {
     /// `SequentialSibling` subs resolve even when an optional parent is declined.
     #[serde(default, skip_serializing_if = "SubAbilityLink::is_continuation")]
     pub sub_link: SubAbilityLink,
+    /// CR 700.2b + CR 603.3c: Modal choice for a reflexive modal trigger whose modes
+    /// are gated behind an optional cost (Caesar). Carried from the def so
+    /// try_begin_reflexive_target_selection can hand it to the PendingTrigger and
+    /// route to AbilityModeChoice. None for non-modal abilities.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modal: Option<ModalChoice>,
+    /// CR 700.2b: One AbilityDefinition per mode for the reflexive modal trigger.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mode_abilities: Vec<AbilityDefinition>,
 }
 
 impl ResolvedAbility {
@@ -14458,6 +14467,8 @@ impl ResolvedAbility {
             repeat_until: None,
             sub_link: SubAbilityLink::ContinuationStep,
             source_incarnation: None,
+            modal: None,
+            mode_abilities: Vec::new(),
         }
     }
 

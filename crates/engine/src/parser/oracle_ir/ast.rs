@@ -1313,6 +1313,15 @@ pub(crate) enum OracleBlockAst {
         trigger_line: String,
         header: ModalHeaderAst,
         modes: Vec<ModeAst>,
+        /// CR 603.12 + CR 700.2b: When the trigger gates its modal choice behind
+        /// an optional reflexive cost ("Whenever you attack, you may sacrifice
+        /// another creature. When you do, choose ..."), this holds the cost
+        /// effect text (e.g. "Sacrifice another creature"). The lowering builds
+        /// an `Effect::Sacrifice { optional }` whose `WhenYouDo` sub_ability
+        /// carries the modal, so the modes fire only after the cost is paid.
+        /// `None` for a plain triggered modal (Pip-Boy), where the modal attaches
+        /// directly as the trigger's execute.
+        optional_cost: Option<String>,
     },
     /// CR 614.12c + CR 607.2d: "As [this permanent] enters, choose <A> or
     /// <B>. \n • <A> — <linked ability>. \n • <B> — <linked ability>." The
