@@ -2222,6 +2222,10 @@ pub enum FilterProp {
     Token,
     /// CR 111.1: Matches objects that are not tokens.
     NonToken,
+    /// CR 305.1 + CR 601.2a: Matches objects entering from being played
+    /// (land play) or cast (spell), excluding tokens put directly onto the
+    /// battlefield without a prior zone.
+    WasPlayed,
     /// CR 508.1b: Matches attacking creatures, optionally scoped by which player
     /// the creature is attacking.
     Attacking {
