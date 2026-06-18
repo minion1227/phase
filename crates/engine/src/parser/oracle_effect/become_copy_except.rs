@@ -70,7 +70,7 @@ use std::str::FromStr;
 
 use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
-use nom::bytes::complete::tag;
+use nom::bytes::complete::{tag, take_until};
 use nom::character::complete::char;
 use nom::combinator::{opt, value};
 use nom::sequence::preceded;
@@ -641,6 +641,23 @@ fn parse_has_this_ability<'a>(
     ))
 }
 
+/// CR 707.9b + CR 205.1b: suffix after the named type in additive copy-except
+/// bodies — covers both the generic "other types" and the creature-specific
+/// "other creature types" phrasing (Sakashima's Student class).
+fn split_in_addition_type_suffix(input: &str) -> Option<(&str, &str)> {
+    let in_addition_suffix = (
+        tag::<_, _, OracleError<'_>>(" in addition to "),
+        alt((tag("its"), tag("their"), tag("his"), tag("her"))),
+        tag(" other "),
+        opt(tag("creature ")),
+        tag("types"),
+    );
+    let (rest, (type_word, _)) = (take_until(" in addition to "), in_addition_suffix)
+        .parse(input)
+        .ok()?;
+    Some((type_word.trim(), rest))
+}
+
 /// CR 707.9b + CR 205.1b: "it's a(n) {type_word} in addition to its other
 /// types", plus the elided-subject form "is a(n) {type_word} in addition to
 /// its other types" used for non-leading bodies in a comma-anded copy-except
@@ -670,9 +687,7 @@ fn parse_its_a_type_in_addition(input: &str) -> Option<(&str, ContinuousModifica
     ))
     .parse(input)
     .ok()?;
-    let (type_word, rest) = nom_primitives::split_once_on(rest, " in addition to its other types")
-        .ok()
-        .map(|(_, pair)| pair)?;
+    let (type_word, rest) = split_in_addition_type_suffix(rest)?;
     let type_word = type_word.trim();
     if type_word.is_empty() {
         return None;
@@ -1460,6 +1475,24 @@ mod tests {
             m,
             ContinuousModification::AddSubtype { subtype } if subtype == "Spider"
         )));
+    }
+
+    /// CR 707.9b: Sakashima's Student — "it's a Ninja in addition to its other
+    /// creature types" uses the creature-type-specific suffix.
+    #[test]
+    fn its_a_ninja_in_addition_to_other_creature_types_emits_add_subtype() {
+        let (_, mods) = parse_except_clause(
+            ", except it's a Ninja in addition to its other creature types",
+            "Sakashima's Student",
+            &ParseContext::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            mods,
+            vec![ContinuousModification::AddSubtype {
+                subtype: "Ninja".to_string(),
+            }]
+        );
     }
 
     /// CR 205.1a + CR 613.1d + CR 707.9d: Myrkul, Lord of Bones — "it's an

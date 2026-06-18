@@ -3917,7 +3917,15 @@ fn apply_action(
                 &mut events,
             )
             .map_err(EngineError::InvalidAction)?;
-            WaitingFor::Priority { player: p }
+            // CR 707.9 + CR 614.12a: battlefield entry may park on
+            // `CopyTargetChoice` (enter-as-copy) or `ReplacementChoice` (optional
+            // copy / CR 616.1 ordering); preserve the surfaced prompt instead of
+            // clobbering it with Priority.
+            if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                WaitingFor::Priority { player: p }
+            } else {
+                state.waiting_for.clone()
+            }
         }
         // CR 702.190a: Sneak — cast a spell from hand during declare blockers
         // by paying the Sneak cost and returning an unblocked attacker.
