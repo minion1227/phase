@@ -260,6 +260,7 @@ fn synthesize_prepared_copy_object(
     // Do not re-enter alternative-face casting logic for this synthetic copy.
     copy_obj.back_face = None;
     apply_back_face_to_object(&mut copy_obj, back.clone());
+    copy_obj.casting_permissions.clear();
     copy_obj
         .casting_permissions
         .push(CastingPermission::ExileWithAltCost {
@@ -390,7 +391,8 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::parser::oracle_effect::parse_effect;
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, QuantityExpr, ReplacementDefinition, TargetFilter,
+        AbilityDefinition, AbilityKind, CastingPermission, QuantityExpr, ReplacementDefinition,
+        TargetFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
@@ -996,6 +998,20 @@ mod tests {
         {
             let source = state.objects.get_mut(&source_id).unwrap();
             source.prepared = Some(PreparedState);
+            // CR 722.3c + CR 118.9a: prepared-copy casting must use the
+            // prepare face's mana cost, not any stale free-cast permission that
+            // happened to be stored on the battlefield source before cloning.
+            source
+                .casting_permissions
+                .push(CastingPermission::ExileWithAltCost {
+                    cost: ManaCost::zero(),
+                    cast_transformed: false,
+                    constraint: None,
+                    granted_to: Some(PlayerId(0)),
+                    resolution_cleanup: None,
+                    duration: None,
+                    exile_instead_of_graveyard_on_resolve: false,
+                });
             source.back_face = Some(BackFaceForTest::prepare_with_cost(ManaCost::Cost {
                 shards: vec![ManaCostShard::Red],
                 generic: 1,
