@@ -51233,6 +51233,10 @@ mod tests {
         );
         assert_eq!(def.player_scope, Some(PlayerFilter::All));
         assert_eq!(def.starting_with, Some(ControllerRef::You));
+        assert!(
+            !def.optional,
+            "join-forces PayCost must not be optional at ability level"
+        );
 
         // Inner: Draw { count: Variable("X"), target: Controller }, player_scope = All.
         let sub = def.sub_ability.as_ref().expect("expected Draw sub_ability");
@@ -51461,6 +51465,33 @@ mod tests {
         ));
         assert_eq!(def.player_scope, Some(PlayerFilter::All));
         assert_eq!(def.starting_with, Some(ControllerRef::You));
+        assert!(
+            !def.optional,
+            "join-forces PayCost must not be optional at ability level"
+        );
+    }
+
+    #[test]
+    fn non_join_forces_x_mana_payment_remains_optional() {
+        let def = parse_effect_chain(
+            "you may pay {X}. if you do, draw X cards",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(
+                &*def.effect,
+                Effect::PayCost {
+                    cost: AbilityCost::Mana { .. },
+                    ..
+                }
+            ),
+            "expected PayCost, got {:?}",
+            def.effect
+        );
+        assert!(
+            def.optional,
+            "ordinary optional X payments must still prompt OptionalEffectChoice"
+        );
     }
 
     // --- compound-subject-each object axis (CR 109.5 / 115.1 / 611.2c) ---
