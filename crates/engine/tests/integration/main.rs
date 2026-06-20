@@ -414,6 +414,7 @@ mod springheart_nantuko_bestow_landfall;
 mod springheart_realdb_repro;
 mod squirrel_mob_dynamic_pump;
 mod steadfast_armasaur_lki_toughness;
+mod steelform_sliver_toughness_anthem;
 mod stensian_sanguinist_prepare;
 mod support;
 mod suppressor_skyguard_prevent_2924;
