@@ -261,6 +261,17 @@ fn parse_remove_counter_quantity_and_kind(
     {
         return Some((REMOVE_COUNTER_COST_X, counter_type));
     }
+    // CR 107.3 + CR 601.2b: "one or more" counters is a player-chosen variable
+    // count (X), announced at activation; "that much" / "counters removed this
+    // way" then scale by the chosen value.
+    if let Ok((_, counter_type)) = all_consuming(preceded(
+        tag::<_, _, E<'_>>("one or more "),
+        parse_remove_counter_kind,
+    ))
+    .parse(input)
+    {
+        return Some((REMOVE_COUNTER_COST_X, counter_type));
+    }
     if let Ok((_, (count, counter_type))) = all_consuming(pair(
         terminated(nom_primitives::parse_number, tag::<_, _, E<'_>>(" ")),
         parse_remove_counter_kind,
@@ -1411,6 +1422,55 @@ mod tests {
             "'any number of' should be encoded separately from literal X"
         );
         assert!(matches!(counter_type, CounterMatch::OfType(_)));
+    }
+
+    // "Remove one or more [type] counters" is a player-chosen variable count
+    // (CR 107.3 / 601.2b), not a literal 1. Before the fix, parse_number ate
+    // "one" as 1 and "or more +1/+1" leaked into a Generic counter type.
+    #[test]
+    fn parse_remove_one_or_more_counters_uses_x_sentinel() {
+        let (count, counter_type) =
+            parse_remove_counter_quantity_and_kind("one or more +1/+1 counters")
+                .expect("should parse 'one or more' counter removal");
+
+        assert_eq!(
+            count, REMOVE_COUNTER_COST_X,
+            "'one or more' should be encoded as the X sentinel, not literal 1"
+        );
+        assert_eq!(
+            counter_type,
+            CounterMatch::OfType(crate::types::counter::CounterType::Plus1Plus1),
+            "counter type must be typed +1/+1, not Generic(\"or more +1/+1\")"
+        );
+    }
+
+    #[test]
+    fn parse_remove_one_or_more_generic_counters_uses_x_sentinel() {
+        let (count, counter_type) =
+            parse_remove_counter_quantity_and_kind("one or more charge counters")
+                .expect("should parse 'one or more' generic counter removal");
+
+        assert_eq!(count, REMOVE_COUNTER_COST_X);
+        assert_eq!(
+            counter_type,
+            CounterMatch::OfType(crate::types::counter::CounterType::Generic(
+                "charge".to_string()
+            )),
+        );
+    }
+
+    // No-regression: the new tag("one or more ") must NOT over-match a bare
+    // singular "one [type] counter", which is a literal count of 1.
+    #[test]
+    fn parse_remove_one_singular_counter_uses_literal_one() {
+        let (count, counter_type) = parse_remove_counter_quantity_and_kind("one +1/+1 counter")
+            .expect("should parse singular 'one' counter removal");
+
+        assert_eq!(count, 1, "bare 'one' is a literal count of 1");
+        assert_eq!(
+            counter_type,
+            CounterMatch::OfType(crate::types::counter::CounterType::Plus1Plus1),
+        );
     }
 
     #[test]
