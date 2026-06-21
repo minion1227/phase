@@ -3967,6 +3967,7 @@ pub(crate) fn try_parse_equip(line: &str) -> Option<AbilityDefinition> {
         }
     }
     ability.cost_reduction = cost_reduction;
+    ability.ability_tag = Some(AbilityTag::Equip);
     Some(ability)
 }
 
@@ -6253,24 +6254,16 @@ mod tests {
         );
     }
 
-    /// CR 702.6a + CR 106.6: Ronin, Shadow Stalker. Its second ability
-    /// ("{T}, Sacrifice an Equipment attached to ~: Target creature gets -4/-4
-    /// until end of turn. Activate only as a sorcery.") is fully supported with
-    /// no Unimplemented parts: a `Pump` effect, a `Composite[Tap, Sacrifice
-    /// Equipment]` cost, and an `AsSorcery` activation restriction.
-    ///
-    /// Its first ability's spend restriction ("Spend this mana only to cast
-    /// Equipment spells or activate equip abilities") is an honest, documented
-    /// gap (an Unimplemented "spend" marker): "equip abilities" (a
-    /// specific keyword ability per CR 702.6a) cannot be modeled by the existing
-    /// `AbilityActivationScope` (`OfSpellType` over-permits any Equipment
-    /// ability; `Any` over-permits any ability), and a categorically-correct
-    /// `EquipAbility` scope would require threading the activated ability's
-    /// identity through `PaymentContext::Activation` and the cost-payment
-    /// authority — out of scope for this change. This test pins both facts so a
-    /// future fix knows exactly what to flip.
+    /// CR 702.6a + CR 106.6: Ronin, Shadow Stalker. Both abilities are fully
+    /// supported:
+    /// - First ability: mana production with `Any([SpellType("Equipment"),
+    ///   ActivateTagged(Equip)])` spend restriction and `OnlyOnceEachTurn`
+    ///   activation restriction.
+    /// - Second ability: -4/-4 Pump effect, Composite[Tap, Sacrifice Equipment]
+    ///   cost, and `AsSorcery` activation restriction.
     #[test]
-    fn ronin_second_ability_supported_first_ability_spend_restriction_deferred() {
+    fn ronin_both_abilities_fully_supported() {
+        use crate::types::ability::{AbilityTag, ManaSpendRestriction};
         let r = parse_oracle_text(
             "Pay 2 life: Add two mana of any one color. Spend this mana only to cast Equipment spells or activate equip abilities. Activate only once each turn.\n{T}, Sacrifice an Equipment attached to ~: Target creature gets -4/-4 until end of turn. Activate only as a sorcery.",
             "Ronin, Shadow Stalker",
@@ -6306,12 +6299,29 @@ mod tests {
             second.activation_restrictions
         );
 
-        // First ability: mana production + once-each-turn parse, but the spend
-        // restriction's "equip abilities" half is a documented gap.
+        // First ability: mana production with equip-ability spend restriction.
         let first = &r.abilities[0];
         assert!(
-            has_unimplemented(first),
-            "first ability's equip-ability spend restriction is a known gap: {first:#?}"
+            !has_unimplemented(first),
+            "first ability must now be fully supported: {first:#?}"
+        );
+        let Effect::Mana { restrictions, .. } = &*first.effect else {
+            panic!("expected Effect::Mana, got {:?}", first.effect);
+        };
+        assert_eq!(
+            restrictions,
+            &[ManaSpendRestriction::Any(vec![
+                ManaSpendRestriction::SpellType("Equipment".to_string()),
+                ManaSpendRestriction::ActivateTagged(AbilityTag::Equip),
+            ])],
+            "equip-ability spend restriction must be keyword-precise"
+        );
+        assert!(
+            first
+                .activation_restrictions
+                .contains(&crate::types::ability::ActivationRestriction::OnlyOnceEachTurn),
+            "once-each-turn restriction must be present: {:?}",
+            first.activation_restrictions
         );
     }
 

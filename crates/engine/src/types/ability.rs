@@ -12247,6 +12247,8 @@ pub enum AbilityTag {
     Backup,
     /// CR 602.5b + CR 602.1: This ability originated from a Power-up keyword definition.
     PowerUp,
+    /// CR 702.6a: This ability originated from an Equip keyword definition.
+    Equip,
 }
 
 impl AbilityTag {
@@ -12263,6 +12265,7 @@ impl AbilityTag {
             AbilityTag::Cycling => "cycling",
             AbilityTag::Backup => "backup",
             AbilityTag::PowerUp => "power-up",
+            AbilityTag::Equip => "equip",
         }
     }
 }
