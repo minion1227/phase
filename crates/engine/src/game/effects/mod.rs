@@ -118,6 +118,7 @@ pub mod heist;
 pub mod hideaway;
 pub mod incubate;
 pub mod intensify;
+pub mod perpetual;
 // Tests for `heist` live in a sibling file (declared here, not in `heist.rs`,
 // so `heist.rs` stays implementation-only — no inline `#[cfg(test)]` token).
 #[cfg(test)]
@@ -2854,6 +2855,7 @@ pub fn resolve_effect(
         Effect::ProcessRadCounters => rad_counters::resolve(state, ability, events),
         Effect::Conjure { .. } => conjure::resolve(state, ability, events),
         Effect::Intensify { .. } => intensify::resolve(state, ability, events),
+        Effect::ApplyPerpetual { .. } => perpetual::resolve(state, ability, events),
         Effect::DraftFromSpellbook { .. } => spellbook::resolve(state, ability, events),
         Effect::ChooseOneOf { .. } => choose_one_of::resolve(state, ability, events),
         Effect::Unimplemented { name, .. } => {

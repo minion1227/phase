@@ -5782,6 +5782,12 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
         return parsed_clause(effect);
     }
 
+    // Digital-only Alchemy: "[~/it/this creature] perpetually become(s)/has base
+    // power and toughness N/N" — the ApplyPerpetual keyword action (base P/T).
+    if let Some(effect) = try_parse_perpetual_base_pt(tp) {
+        return parsed_clause(effect);
+    }
+
     // Digital-only Alchemy: "draft a card from [X]'s spellbook [+ destination]".
     if let Some(effect) = try_parse_spellbook_draft(tp) {
         return parsed_clause(effect);
@@ -5912,6 +5918,69 @@ fn try_parse_intensify(tp: TextPair) -> Option<Effect> {
     tail_done(rest).then_some(Effect::Intensify {
         scope: IntensityScope::Source,
         amount,
+    })
+}
+
+/// Digital-only Alchemy: parse the self-subject base-P/T "perpetually" form —
+/// "[~ / it / this creature / …] perpetually become(s)/has base power and
+/// toughness N/N" → [`Effect::ApplyPerpetual`] with
+/// [`PerpetualModification::SetBasePowerToughness`] (High Fae Prankster).
+///
+/// Increment 1 handles only the self-subject (resolved to the source). The
+/// referenced-object forms ("the duplicate"/"its base power and toughness
+/// perpetually become …", Three Tree Battalion, Blood Age Muster) are left to
+/// `Unimplemented` until the referenced-object target wiring lands. The clause
+/// tail must be fully consumed so riders (e.g. "… and gains flying") fall
+/// through instead of being silently dropped.
+fn try_parse_perpetual_base_pt(tp: TextPair) -> Option<Effect> {
+    let lower = tp.lower;
+    // Only unambiguous self-subjects. The anaphoric "it " is intentionally
+    // excluded: after a prior object choice it refers to that object, not the
+    // source, so accepting it here would let a referenced-object perpetual clause
+    // parse as supported while mutating the wrong object. Referenced-object forms
+    // ("the duplicate"/"its …") are deferred until real referent binding lands.
+    let after_subject = [
+        "~ ",
+        "this creature ",
+        "this artifact ",
+        "this enchantment ",
+        "this permanent ",
+        "this token ",
+        "this card ",
+    ]
+    .iter()
+    .find_map(|subject| {
+        tag::<_, _, OracleError<'_>>(*subject)
+            .parse(lower)
+            .ok()
+            .map(|(rest, _)| rest)
+    })?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>("perpetually ")
+        .parse(after_subject)
+        .ok()?;
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("becomes "),
+        tag::<_, _, OracleError<'_>>("become "),
+        tag::<_, _, OracleError<'_>>("has "),
+        tag::<_, _, OracleError<'_>>("have "),
+    ))
+    .parse(rest)
+    .ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>("base power and toughness ")
+        .parse(rest)
+        .ok()?;
+    let (rest, power) = nom_primitives::parse_number(rest).ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>("/").parse(rest).ok()?;
+    let (rest, toughness) = nom_primitives::parse_number(rest).ok()?;
+    if !(rest.is_empty() || rest == ".") {
+        return None;
+    }
+    Some(Effect::ApplyPerpetual {
+        target: TargetFilter::Any,
+        modification: crate::types::ability::PerpetualModification::SetBasePowerToughness {
+            power: power as i32,
+            toughness: toughness as i32,
+        },
     })
 }
 
@@ -48361,6 +48430,38 @@ mod tests {
                 ..
             } if type_filters == vec![TypeFilter::Creature]
                 && properties == vec![FilterProp::Blocking, FilterProp::Another]
+        ));
+    }
+
+    #[test]
+    fn perpetual_parser_maps_self_base_pt() {
+        use crate::types::ability::PerpetualModification;
+        // Self-subject base-P/T form (High Fae Prankster); the card's own name
+        // normalizes to `~` in Oracle text.
+        let e = parse_effect("~ perpetually has base power and toughness 4/1.");
+        assert!(matches!(
+            e,
+            Effect::ApplyPerpetual {
+                modification: PerpetualModification::SetBasePowerToughness {
+                    power: 4,
+                    toughness: 1,
+                },
+                ..
+            }
+        ));
+
+        // "become(s)" verb variant. (Uses an unambiguous self-subject; the
+        // anaphoric "it" form is intentionally not accepted.)
+        let e = parse_effect("This creature perpetually becomes base power and toughness 2/2.");
+        assert!(matches!(
+            e,
+            Effect::ApplyPerpetual {
+                modification: PerpetualModification::SetBasePowerToughness {
+                    power: 2,
+                    toughness: 2,
+                },
+                ..
+            }
         ));
     }
 
