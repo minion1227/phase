@@ -23,6 +23,7 @@ use super::phase::Phase;
 use super::player::{PlayerCounterKind, PlayerId};
 use super::replacements::ReplacementEvent;
 use super::statics::{ActivationExemption, CastFrequency, StaticMode};
+use super::stickers::{AppliedSticker, StickerKind};
 use super::triggers::TriggerMode;
 use super::zones::{EtbTapState, Zone};
 use crate::game::game_object::DisplaySource;
@@ -9285,6 +9286,32 @@ pub enum Effect {
     },
     /// CR 701.52: Roll to visit your Attractions.
     RollToVisitAttractions,
+    /// CR 123.3: Put one or more stickers you have access to on a target object.
+    PutSticker {
+        #[serde(default = "default_target_filter_any")]
+        target: TargetFilter,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        kind: Option<StickerKind>,
+        #[serde(default = "default_quantity_one")]
+        count: QuantityExpr,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_ticket_cost: Option<QuantityExpr>,
+        #[serde(
+            default,
+            alias = "without_paying",
+            deserialize_with = "deserialize_sticker_ticket_cost_payment",
+            skip_serializing_if = "is_default_sticker_ticket_cost_payment"
+        )]
+        ticket_cost_payment: StickerTicketCostPayment,
+    },
+    /// Runtime-selected sticker application branch used by `PutSticker`.
+    ApplySticker {
+        #[serde(default = "default_target_filter_any")]
+        target: TargetFilter,
+        sticker: AppliedSticker,
+        #[serde(default)]
+        pay_ticket: bool,
+    },
     /// CR 728.1: Process rad counters — mill cards equal to rad counter count,
     /// lose 1 life and remove one rad counter per nonland card milled.
     ProcessRadCounters,
@@ -10050,6 +10077,39 @@ pub enum Effect {
         #[serde(default)]
         description: Option<String>,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum StickerTicketCostPayment {
+    #[default]
+    PayNormally,
+    WithoutPaying,
+}
+
+fn is_default_sticker_ticket_cost_payment(mode: &StickerTicketCostPayment) -> bool {
+    *mode == StickerTicketCostPayment::PayNormally
+}
+
+fn deserialize_sticker_ticket_cost_payment<'de, D>(
+    deserializer: D,
+) -> Result<StickerTicketCostPayment, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Repr {
+        Legacy(bool),
+        Tagged(StickerTicketCostPayment),
+    }
+
+    Ok(match Option::<Repr>::deserialize(deserializer)? {
+        None => StickerTicketCostPayment::PayNormally,
+        Some(Repr::Legacy(true)) => StickerTicketCostPayment::WithoutPaying,
+        Some(Repr::Legacy(false)) => StickerTicketCostPayment::PayNormally,
+        Some(Repr::Tagged(mode)) => mode,
+    })
 }
 
 fn default_one() -> u32 {
@@ -10860,6 +10920,8 @@ impl Effect {
             | Effect::SetLifeTotal { target, .. }
             | Effect::GiveControl { target, .. }
             | Effect::RemoveFromCombat { target, .. }
+            | Effect::PutSticker { target, .. }
+            | Effect::ApplySticker { target, .. }
             | Effect::ProliferateTarget { target, .. }
             // CR 115.7 + CR 115.1: "Change the target of target spell or ability"
             // (Bolt Bend, Redirect, Misdirection) targets the stack spell/ability
@@ -11383,6 +11445,8 @@ impl Effect {
             | Effect::MiracleCast { .. }
             | Effect::OpenAttractions { .. }
             | Effect::PayCost { .. }
+            | Effect::PutSticker { .. }
+            | Effect::ApplySticker { .. }
             | Effect::ProcessRadCounters
             | Effect::ReduceNextSpellCost { .. }
             | Effect::RevealFromHand { .. }
@@ -11599,6 +11663,8 @@ impl Effect {
             | Effect::MiracleCast { .. }
             | Effect::OpenAttractions { .. }
             | Effect::PayCost { .. }
+            | Effect::PutSticker { .. }
+            | Effect::ApplySticker { .. }
             | Effect::ProcessRadCounters
             | Effect::ReduceNextSpellCost { .. }
             | Effect::RevealFromHand { .. }
@@ -11762,6 +11828,8 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::Planeswalk => "Planeswalk",
         Effect::OpenAttractions { .. } => "OpenAttractions",
         Effect::RollToVisitAttractions => "RollToVisitAttractions",
+        Effect::PutSticker { .. } => "PutSticker",
+        Effect::ApplySticker { .. } => "ApplySticker",
         Effect::ProcessRadCounters => "ProcessRadCounters",
         Effect::GrantCastingPermission { .. } => "GrantCastingPermission",
         Effect::ChooseFromZone { .. } => "ChooseFromZone",
@@ -11977,6 +12045,8 @@ pub enum EffectKind {
     Planeswalk,
     OpenAttractions,
     RollToVisitAttractions,
+    PutSticker,
+    ApplySticker,
     ProcessRadCounters,
     GrantCastingPermission,
     ChooseFromZone,
@@ -12201,6 +12271,8 @@ impl From<&Effect> for EffectKind {
             Effect::Planeswalk => EffectKind::Planeswalk,
             Effect::OpenAttractions { .. } => EffectKind::OpenAttractions,
             Effect::RollToVisitAttractions => EffectKind::RollToVisitAttractions,
+            Effect::PutSticker { .. } => EffectKind::PutSticker,
+            Effect::ApplySticker { .. } => EffectKind::ApplySticker,
             Effect::ProcessRadCounters => EffectKind::ProcessRadCounters,
             Effect::GrantCastingPermission { .. } => EffectKind::GrantCastingPermission,
             Effect::ChooseFromZone { .. } => EffectKind::ChooseFromZone,

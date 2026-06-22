@@ -13900,6 +13900,71 @@ mod tests {
     }
 
     #[test]
+    fn put_name_sticker_parses() {
+        use crate::parser::oracle_effect::parse_effect;
+        let effect = parse_effect("put a name sticker on target creature you own");
+        assert!(
+            matches!(
+                effect,
+                Effect::PutSticker {
+                    kind: Some(crate::types::stickers::StickerKind::Name),
+                    count: QuantityExpr::Fixed { value: 1 },
+                    max_ticket_cost: None,
+                    ticket_cost_payment:
+                        crate::types::ability::StickerTicketCostPayment::PayNormally,
+                    ..
+                }
+            ),
+            "expected PutSticker name effect, got {:?}",
+            effect,
+        );
+    }
+
+    #[test]
+    fn put_ticket_bounded_ability_sticker_parses() {
+        use crate::parser::oracle_effect::parse_effect;
+        let effect = parse_effect(
+            "put an ability sticker with ticket cost 2 or less on target nonland permanent you own without paying that sticker's ticket cost",
+        );
+        assert!(
+            matches!(
+                effect,
+                Effect::PutSticker {
+                    kind: Some(crate::types::stickers::StickerKind::Ability),
+                    count: QuantityExpr::Fixed { value: 1 },
+                    max_ticket_cost: Some(QuantityExpr::Fixed { value: 2 }),
+                    ticket_cost_payment:
+                        crate::types::ability::StickerTicketCostPayment::WithoutPaying,
+                    ..
+                }
+            ),
+            "expected bounded ability-sticker effect, got {:?}",
+            effect,
+        );
+    }
+
+    #[test]
+    fn put_up_to_two_name_stickers_parses() {
+        use crate::parser::oracle_effect::parse_effect;
+        let effect = parse_effect("put up to two name stickers on target creature you own");
+        assert!(
+            matches!(
+                effect,
+                Effect::PutSticker {
+                    kind: Some(crate::types::stickers::StickerKind::Name),
+                    count: QuantityExpr::UpTo { .. },
+                    max_ticket_cost: None,
+                    ticket_cost_payment:
+                        crate::types::ability::StickerTicketCostPayment::PayNormally,
+                    ..
+                }
+            ),
+            "expected up-to-two name-sticker effect, got {:?}",
+            effect,
+        );
+    }
+
+    #[test]
     fn repeat_this_process_you_may_sets_controller_choice() {
         use crate::parser::oracle_effect::parse_effect_chain;
         use crate::types::ability::RepeatContinuation;

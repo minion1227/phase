@@ -1,16 +1,34 @@
 import { beforeEach, describe, expect, it } from "vitest";
 
 import {
+  loadSavedDeck,
   loadSavedDeckBracket,
   saveSavedDeckBracket,
   STORAGE_KEY_PREFIX,
 } from "../storage";
+import { expandParsedDeck } from "../../services/deckParser";
 
 beforeEach(() => {
   localStorage.clear();
 });
 
 describe("saved-deck bracket sidecar", () => {
+  it("preserves sticker sheets when loading and expanding a saved deck", () => {
+    localStorage.setItem(
+      STORAGE_KEY_PREFIX + "Sticker Deck",
+      JSON.stringify({
+        main: [{ count: 1, name: "Sol Ring" }],
+        sideboard: [],
+        sticker_sheets: ["sheet-1", "sheet-2", "sheet-3"],
+      }),
+    );
+
+    const loaded = loadSavedDeck("Sticker Deck");
+
+    expect(loaded?.sticker_sheets).toEqual(["sheet-1", "sheet-2", "sheet-3"]);
+    expect(loaded && expandParsedDeck(loaded).sticker_sheets).toEqual(["sheet-1", "sheet-2", "sheet-3"]);
+  });
+
   it("returns null when the deck does not exist", () => {
     expect(loadSavedDeckBracket("Missing Deck")).toBeNull();
   });

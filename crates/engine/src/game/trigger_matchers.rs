@@ -827,7 +827,8 @@ fn count_matching_trigger_event_subjects(
         | GameEvent::PermanentSacrificed { object_id, .. }
         | GameEvent::ControllerChanged { object_id, .. }
         | GameEvent::PermanentTapped { object_id, .. }
-        | GameEvent::PermanentUntapped { object_id } => count_one(*object_id),
+        | GameEvent::PermanentUntapped { object_id }
+        | GameEvent::StickerPlaced { object_id, .. } => count_one(*object_id),
         // CR 702.140c + CR 730.2c: the merged (surviving) permanent is the subject.
         GameEvent::Mutated { merged_id, .. } => count_one(*merged_id),
         // Object target events yield the affected object as subject. Player

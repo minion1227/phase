@@ -411,7 +411,8 @@ pub fn mark_public_state_from_events(state: &mut GameState, events: &[GameEvent]
             | GameEvent::CascadeMissed { .. }
             | GameEvent::DebugActionUsed { .. }
             | GameEvent::DebugPermissionGranted { .. }
-            | GameEvent::DebugPermissionRevoked { .. } => {}
+            | GameEvent::DebugPermissionRevoked { .. }
+            | GameEvent::StickerPlaced { .. } => {}
         }
     }
 }

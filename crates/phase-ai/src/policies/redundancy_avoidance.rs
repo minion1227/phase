@@ -611,6 +611,8 @@ fn redundancy_delta(
         // no static redundancy signal; the AI scores Heist via the generic
         // effect-rating path, not the redundancy-avoidance table.
         | Effect::Heist { .. }
+        | Effect::PutSticker { .. }
+        | Effect::ApplySticker { .. }
         | Effect::HeistExile => None,
     }
 }

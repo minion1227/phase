@@ -19,6 +19,7 @@ use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::keywords::{Keyword, KeywordKind};
 use crate::types::mana::{ColoredManaCount, ManaColor, ManaCost, ManaPip};
 use crate::types::player::PlayerId;
+use crate::types::stickers::AppliedSticker;
 use crate::types::zones::Zone;
 
 /// Image-lookup routing hint for the display layer.
@@ -424,6 +425,9 @@ pub struct GameObject {
     /// tracked via `Player::attraction_deck` rather than `command_zone`.
     #[serde(default)]
     pub in_attraction_deck: bool,
+    /// CR 123.1 + CR 123.5: Stickers are object state, distinct from counters.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stickers: Vec<AppliedSticker>,
     pub mana_cost: ManaCost,
     pub keywords: Vec<Keyword>,
     /// Live abilities after layer evaluation. Wrapped in `Arc<Vec<_>>` so
@@ -1192,6 +1196,7 @@ impl GameObject {
             card_types: CardType::default(),
             attraction_lights: Vec::new(),
             in_attraction_deck: false,
+            stickers: Vec::new(),
             mana_cost: ManaCost::default(),
             keywords: Vec::new(),
             abilities: Arc::new(Vec::new()),

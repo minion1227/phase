@@ -1563,9 +1563,18 @@ pub fn evaluate_layers(state: &mut GameState) {
     for effect in &ordered_copy {
         apply_continuous_effect(state, effect, &mut abilities_suppressed);
     }
+    if crate::game::stickers::apply_battlefield_name_and_ability_stickers(state, &bf_ids) {
+        // Sticker ability text is appended after the top-of-pass reset/copy
+        // application, so a sticker can turn a non-generator into a continuous
+        // static source mid-pass. Refresh the generator index before the main
+        // gather so those sticker-granted statics participate in this pass
+        // without broadening the non-sticker top-of-pass rebuild contract.
+        crate::types::game_state::StaticSourceIndex::rebuild_from_state(state);
+    }
 
     // Step 3: Gather active continuous effects after layer 1 is applied.
-    let effects_by_layer = gather_active_continuous_effects(state);
+    let mut effects_by_layer = gather_active_continuous_effects(state);
+    crate::game::stickers::append_battlefield_pt_sticker_effects(state, &mut effects_by_layer);
 
     // Step 4: Process each remaining layer in order
     for (layer, layer_bucket) in &effects_by_layer {
@@ -2236,6 +2245,15 @@ fn apply_layers_incremental(state: &mut GameState, entered_ids: &HashSet<ObjectI
         apply_continuous_effect_to(state, effect, &recipient_ids, &mut abilities_suppressed);
     }
 
+    let recipient_vec: Vec<ObjectId> = recipient_ids.iter().copied().collect();
+    if crate::game::stickers::apply_battlefield_name_and_ability_stickers(state, &recipient_vec) {
+        // Incremental resets clear the entered/attached recipients back to base,
+        // so retained stickers must be re-applied before the restricted main
+        // gather. If a sticker grants a continuous static ability, refresh the
+        // generator index so the recipient can source that effect in this pass.
+        crate::types::game_state::StaticSourceIndex::rebuild_from_state(state);
+    }
+
     // Step 3-4: Remaining layers in order, restricted to recipient objects.
     let effects_by_layer = gather_active_continuous_effects(state);
     for (layer, layer_bucket) in &effects_by_layer {
@@ -2272,7 +2290,6 @@ fn apply_layers_incremental(state: &mut GameState, entered_ids: &HashSet<ObjectI
         }
         if *layer == Layer::Type {
             apply_prototype_characteristics(state, recipient_ids.iter().copied());
-            let recipient_vec: Vec<ObjectId> = recipient_ids.iter().copied().collect();
             apply_intrinsic_basic_land_mana_abilities(state, &recipient_vec);
         }
     }
@@ -13762,6 +13779,65 @@ mod tests {
              pass — top-of-pass rebuild)"
         );
         assert_eq!(after_b.toughness, Some(4));
+    }
+
+    /// Sticker-granted continuous statics must participate in the same source
+    /// index as printed generators, even when another generator already makes
+    /// the index non-empty and therefore disarms the direct-scan fallback.
+    #[test]
+    fn sticker_static_source_is_indexed_with_preexisting_generator() {
+        let mut state = setup();
+
+        // Pre-existing generator disarms the empty-index fallback.
+        make_anthem(&mut state, "Anthem A", PlayerId(0));
+        let creature = make_creature(&mut state, "Bear", 2, 2, PlayerId(0));
+
+        crate::game::stickers::set_player_sticker_sheets(
+            &mut state,
+            PlayerId(0),
+            &["Vampire Champion Fury".to_string()],
+        );
+        let hellbent = crate::game::stickers::available_sticker_candidates(
+            &state,
+            PlayerId(0),
+            Some(crate::types::stickers::StickerKind::Ability),
+            None,
+            true,
+        )
+        .into_iter()
+        .find(|candidate| {
+            matches!(
+                &candidate.sticker,
+                crate::types::stickers::AppliedSticker::Ability { text, .. }
+                    if text
+                        == "Hellbent — This creature gets +3/+3 as long as you have no cards in hand."
+            )
+        })
+        .expect("hellbent sticker available");
+        let mut events = Vec::new();
+        crate::game::stickers::apply_selected_sticker(
+            &mut state,
+            PlayerId(0),
+            creature,
+            hellbent.sticker,
+            hellbent.pay_ticket,
+            &mut events,
+        );
+
+        evaluate_layers(&mut state);
+
+        assert!(
+            state
+                .static_source_index
+                .battlefield_sources
+                .iter()
+                .any(|&id| id == creature),
+            "sticker-granted continuous static source must be indexed in the \
+             same pass, even when another generator keeps the fallback disabled"
+        );
+        let creature_obj = state.objects.get(&creature).unwrap();
+        assert_eq!(creature_obj.power, Some(6));
+        assert_eq!(creature_obj.toughness, Some(6));
     }
 
     /// FIX-B counterpart: the SAME scenario under the buggy end-of-pass rebuild

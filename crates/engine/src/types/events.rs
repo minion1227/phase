@@ -8,6 +8,7 @@ use super::identifiers::{CardId, ObjectId};
 use super::mana::ManaType;
 use super::phase::Phase;
 use super::player::{PlayerCounterKind, PlayerId};
+use super::stickers::StickerKind;
 use super::zones::Zone;
 
 /// CR 121.1: Default `nth_in_step` for `CardDrawn` events deserialized from
@@ -701,6 +702,11 @@ pub enum GameEvent {
     AttractionOpened {
         player_id: PlayerId,
         object_id: ObjectId,
+    },
+    StickerPlaced {
+        player_id: PlayerId,
+        object_id: ObjectId,
+        kind: StickerKind,
     },
     /// CR 701.52: The active player rolled to visit their Attractions.
     AttractionsRolledToVisit {

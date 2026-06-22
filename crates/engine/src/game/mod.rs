@@ -126,6 +126,10 @@ mod splice_tests;
 pub mod stack;
 pub mod static_abilities;
 pub mod static_source_index;
+pub mod stickers;
+#[cfg(test)]
+#[path = "stickers_tests.rs"]
+mod stickers_tests;
 pub mod targeting;
 pub mod token_presets;
 pub mod transform;

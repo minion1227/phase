@@ -32,8 +32,8 @@ use crate::types::ability::{
     CopyRetargetPermission, DoorLockOp, Duration, Effect, EffectScope, FaceDownProfile, FilterProp,
     LibraryPosition, MultiTargetSpec, OutsideGameSourcePool, PlayerScope, PreventionAmount,
     PreventionScope, PtStat, PtValue, QuantityExpr, QuantityRef, SearchSelectionConstraint,
-    StaticDefinition, TapStateChange, TargetFilter, TargetSelectionMode, TypeFilter, TypedFilter,
-    ZoneOwner,
+    StaticDefinition, StickerTicketCostPayment, TapStateChange, TargetFilter, TargetSelectionMode,
+    TypeFilter, TypedFilter, ZoneOwner,
 };
 use crate::types::card_type::CoreType;
 use crate::types::phase::Phase;
@@ -126,6 +126,152 @@ fn parse_dig_library_owner(rest_lower: &str) -> TargetFilter {
     }
 
     TargetFilter::Controller
+}
+
+fn try_parse_put_sticker_effect(
+    lower: &str,
+    ctx: &mut ParseContext,
+) -> Option<crate::types::ability::Effect> {
+    let text = lower.trim().trim_end_matches('.');
+    let (target_text, (count, kind, max_ticket_cost)) = parse_put_sticker_clause(text).ok()?;
+    if max_ticket_cost.is_some() && kind != Some(crate::types::stickers::StickerKind::Ability) {
+        return None;
+    }
+    let (_, (target_text, ticket_cost_payment)) =
+        parse_put_sticker_target_tail(target_text).ok()?;
+    let (target, rem) = parse_target_with_ctx(target_text.trim(), ctx);
+    if !rem.trim().is_empty() {
+        return None;
+    }
+    Some(Effect::PutSticker {
+        target,
+        kind,
+        count,
+        max_ticket_cost,
+        ticket_cost_payment,
+    })
+}
+
+fn parse_put_sticker_clause(
+    input: &str,
+) -> OracleResult<
+    '_,
+    (
+        QuantityExpr,
+        Option<crate::types::stickers::StickerKind>,
+        Option<QuantityExpr>,
+    ),
+> {
+    let (input, _) = tag::<_, _, OracleError<'_>>("put ").parse(input)?;
+    let (input, count) = parse_sticker_count_expr(input)?;
+    let (input, kind) = parse_sticker_kind(input)?;
+    let (input, max_ticket_cost) = opt(preceded(
+        tag::<_, _, OracleError<'_>>(" with ticket cost "),
+        parse_sticker_max_ticket_cost,
+    ))
+    .parse(input)?;
+    let (input, _) = tag::<_, _, OracleError<'_>>(" on ").parse(input)?;
+    Ok((input, (count, kind, max_ticket_cost)))
+}
+
+fn parse_sticker_count_expr(input: &str) -> OracleResult<'_, QuantityExpr> {
+    alt((
+        map(
+            terminated(
+                preceded(
+                    tag::<_, _, OracleError<'_>>("up to "),
+                    parse_sticker_count_atom,
+                ),
+                tag(" "),
+            ),
+            QuantityExpr::up_to,
+        ),
+        terminated(parse_sticker_count_atom, tag(" ")),
+    ))
+    .parse(input)
+}
+
+fn parse_sticker_count_atom(input: &str) -> OracleResult<'_, QuantityExpr> {
+    alt((
+        value(
+            QuantityExpr::Ref {
+                qty: QuantityRef::Variable {
+                    name: "X".to_string(),
+                },
+            },
+            tag::<_, _, OracleError<'_>>("x"),
+        ),
+        map(nom_primitives::parse_number, |value| QuantityExpr::Fixed {
+            value: value as i32,
+        }),
+    ))
+    .parse(input)
+}
+
+fn parse_sticker_kind(
+    input: &str,
+) -> OracleResult<'_, Option<crate::types::stickers::StickerKind>> {
+    let (input, kind) = alt((
+        value(
+            Some(crate::types::stickers::StickerKind::PowerToughness),
+            tag::<_, _, OracleError<'_>>("power and toughness sticker"),
+        ),
+        value(
+            Some(crate::types::stickers::StickerKind::Name),
+            tag::<_, _, OracleError<'_>>("name sticker"),
+        ),
+        value(
+            Some(crate::types::stickers::StickerKind::Art),
+            tag::<_, _, OracleError<'_>>("art sticker"),
+        ),
+        value(
+            Some(crate::types::stickers::StickerKind::Ability),
+            tag::<_, _, OracleError<'_>>("ability sticker"),
+        ),
+        value(None, tag::<_, _, OracleError<'_>>("sticker")),
+    ))
+    .parse(input)?;
+    let (input, _) = opt(tag::<_, _, OracleError<'_>>("s")).parse(input)?;
+    Ok((input, kind))
+}
+
+fn parse_sticker_max_ticket_cost(input: &str) -> OracleResult<'_, QuantityExpr> {
+    let (rest, cost_text) = terminated(
+        take_until::<_, _, OracleError<'_>>(" or less"),
+        tag::<_, _, OracleError<'_>>(" or less"),
+    )
+    .parse(input)?;
+    let Some((expr, trailing)) = parse_count_expr(cost_text.trim()) else {
+        return Err(nom::Err::Error(OracleError::from_error_kind(
+            input,
+            nom::error::ErrorKind::Verify,
+        )));
+    };
+    if !trailing.trim().is_empty() {
+        return Err(nom::Err::Error(OracleError::from_error_kind(
+            input,
+            nom::error::ErrorKind::Verify,
+        )));
+    }
+    Ok((rest, expr))
+}
+
+fn parse_put_sticker_target_tail(
+    input: &str,
+) -> OracleResult<'_, (&str, StickerTicketCostPayment)> {
+    all_consuming(alt((
+        map(
+            terminated(
+                take_until::<_, _, OracleError<'_>>(" without paying that sticker's ticket cost"),
+                tag::<_, _, OracleError<'_>>(" without paying that sticker's ticket cost"),
+            ),
+            |target_text| (target_text, StickerTicketCostPayment::WithoutPaying),
+        ),
+        map(rest, |target_text| {
+            (target_text, StickerTicketCostPayment::PayNormally)
+        }),
+    )))
+    .parse(input)
 }
 
 /// Shared ControlNextTurn suffix parser (CR 723.1). Called after a prefix
@@ -7059,6 +7205,31 @@ pub(super) fn parse_imperative_family_ast(
         }));
     }
 
+    if nom_on_lower(first_word, first_word, |i| value((), tag("put")).parse(i)).is_some() {
+        return if nom_primitives::scan_contains(lower, "that many")
+            && nom_primitives::scan_contains(lower, "counter")
+        {
+            try_parse_that_many_counters(lower, ctx)
+                .map(ImperativeFamilyAst::GainKeyword)
+                .or_else(|| {
+                    try_parse_put_sticker_effect(lower, ctx).map(ImperativeFamilyAst::GainKeyword)
+                })
+                .or_else(|| {
+                    parse_zone_counter_ast(text, lower, ctx)
+                        .map(ImperativeFamilyAst::ZoneCounter)
+                        .or_else(|| parse_put_ast(text, lower, ctx).map(ImperativeFamilyAst::Put))
+                })
+        } else {
+            try_parse_put_sticker_effect(lower, ctx)
+                .map(ImperativeFamilyAst::GainKeyword)
+                .or_else(|| {
+                    parse_zone_counter_ast(text, lower, ctx)
+                        .map(ImperativeFamilyAst::ZoneCounter)
+                        .or_else(|| parse_put_ast(text, lower, ctx).map(ImperativeFamilyAst::Put))
+                })
+        };
+    }
+
     // NOTE: when adding verbs here, also add them to IMPERATIVE_EXTRA_VERBS
     // in game/gap_analysis.rs so the parser gap analyzer can classify them.
     match first_word {
@@ -7821,30 +7992,6 @@ pub(super) fn parse_imperative_family_ast(
             }
             None
         }
-
-        // ── Multi-category verbs (priority sub-dispatch) ──
-
-        // "put that many +1/+1 counters on ~" — dynamic counter count from event context.
-        // Intercepted before standard dispatch because parse_number can't handle "that many".
-        // Produces a PutCounter with the counter type and target, using EventContextAmount
-        // for the count. The engine resolver reads the count from the resolved ability's
-        // event_context_amount field.
-        "put"
-            if nom_primitives::scan_contains(lower, "that many")
-                && nom_primitives::scan_contains(lower, "counter") =>
-        {
-            try_parse_that_many_counters(lower, ctx)
-                .map(ImperativeFamilyAst::GainKeyword)
-                .or_else(|| {
-                    parse_zone_counter_ast(text, lower, ctx)
-                        .map(ImperativeFamilyAst::ZoneCounter)
-                        .or_else(|| parse_put_ast(text, lower, ctx).map(ImperativeFamilyAst::Put))
-                })
-        }
-        // "put" → counter (step 2) first, then zone-change (step 12)
-        "put" => parse_zone_counter_ast(text, lower, ctx)
-            .map(ImperativeFamilyAst::ZoneCounter)
-            .or_else(|| parse_put_ast(text, lower, ctx).map(ImperativeFamilyAst::Put)),
 
         // "remove" → "remove from combat" (CR 506.4) → counter removal (step 2)
         "remove" => parse_remove_from_combat_ast(lower, ctx) // allow-noncombinator: pre-existing match dispatch, only threading ctx through
