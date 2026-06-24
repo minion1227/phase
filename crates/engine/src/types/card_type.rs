@@ -283,6 +283,8 @@ pub const ENCHANTMENT_SUBTYPES: &[&str] = &[
     "Case",
     "Class",
     "Curse",
+    // CR 205.3h: "Plan" enchantment subtype (Marvel's Spider-Man / MSH).
+    "Plan",
     "Role",
     "Room",
     "Rune",
