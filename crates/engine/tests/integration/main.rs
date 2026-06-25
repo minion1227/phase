@@ -185,6 +185,7 @@ mod issue_1971_enduring_tenacity;
 mod issue_1973_rise_of_dark_realms;
 mod issue_1985_dfc_command_zone_cast;
 mod issue_1987_bucknards_everfull_purse;
+mod issue_1996_rot_wolf_draw;
 mod issue_2011_eldrazi_temple_kozilek_cast;
 mod issue_2020_smeagol_ring_tempt;
 mod issue_2345_lavinia_no_mana_spent;
