@@ -3361,9 +3361,24 @@ fn parse_combat_relation_suffix(text: &str) -> Option<(FilterProp, usize)> {
 /// then verifies a trailing space exists (color as adjective, not standalone).
 fn parse_color_prefix(text: &str) -> Option<(FilterProp, usize)> {
     let (rest, color) = nom_primitives::parse_color(text).ok()?;
-    // Must be followed by a space (color adjective prefix, not standalone color word).
-    let (rest, _) = tag::<_, _, OracleError<'_>>(" ").parse(rest).ok()?;
-    let consumed = text.len() - rest.len();
+    // CR 105.1: A color word is an adjective prefix only when a separator
+    // follows, so a bare color word ("whiteness") never matches. Two separators
+    // are accepted:
+    //   * a trailing space — the ordinary "white creature" prefix (consumed);
+    //   * a comma — the color-list continuation "white, blue, or black
+    //     creature", where the comma is left in place for the `TYPE_SEPARATORS`
+    //     recursion to consume as a ", " / ", or " disjunction separator. That
+    //     recursion + `distribute_core_type_to_or` then assemble the ≥3-color
+    //     prenominal chain into the same Or-of-legs shape the 2-color "green or
+    //     white creature" form already produces, with the core type backfilled
+    //     onto every color-only leg.
+    let consumed = if let Ok((after_space, _)) = tag::<_, _, OracleError<'_>>(" ").parse(rest) {
+        text.len() - after_space.len()
+    } else if rest.starts_with(',') {
+        text.len() - rest.len()
+    } else {
+        return None;
+    };
     Some((FilterProp::HasColor { color }, consumed))
 }
 
@@ -9894,16 +9909,61 @@ mod tests {
     }
 
     #[test]
+    fn or_color_disjunction_three_colors_backfills_core_type() {
+        // ≥3-color prenominal disjunction class: "target white, blue, or black
+        // creature". Unlike the 2-color "green or white creature" form (which the
+        // bare " or " `TYPE_SEPARATORS` arm assembles), the inner legs here are
+        // comma-separated bare color words ("blue,"). `parse_color_prefix` now
+        // accepts a color followed by a comma, so the leading color is consumed
+        // and the ", " / ", or " separators drive the same recursion; the
+        // [Any]-typed color-only legs are then backfilled to [Creature] by
+        // `distribute_core_type_to_or`. This pins the full parse pipeline (the
+        // surface assembly the distributor-only test below cannot reach).
+        let (f, rest) = parse_target("target white, blue, or black creature");
+        assert_eq!(rest.trim(), "");
+        let TargetFilter::Or { filters } = f else {
+            panic!("expected Or filter, got {f:?}");
+        };
+        assert_eq!(filters.len(), 3, "expected 3-way OR, got {filters:#?}");
+        // Every leg must carry exactly [Creature] (the white/blue legs were [Any]).
+        for (i, leg) in filters.iter().enumerate() {
+            let tf = typed_leg(leg).unwrap_or_else(|| panic!("leg {i} not Typed: {leg:?}"));
+            assert_eq!(
+                tf.type_filters,
+                vec![TypeFilter::Creature],
+                "leg {i} must be [Creature], got {:?}",
+                tf.type_filters
+            );
+        }
+        assert_eq!(
+            leg_color(&filters[0]),
+            Some(ManaColor::White),
+            "leg 0 = white"
+        );
+        assert_eq!(
+            leg_color(&filters[1]),
+            Some(ManaColor::Blue),
+            "leg 1 = blue"
+        );
+        assert_eq!(
+            leg_color(&filters[2]),
+            Some(ManaColor::Black),
+            "leg 2 = black"
+        );
+    }
+
+    #[test]
     fn distribute_core_type_to_or_backfills_every_flat_any_leg() {
         // Building-block test: `merge_or_filters` flattens nested `Or`s, so a
         // ≥3-disjunct list arrives at `distribute_core_type_to_or` as flat
         // siblings. Drive the distributor directly with a flat 3-leg Or in which
         // two legs are the deferred-type `[Any]` shape (color-only) and the last
         // carries the concrete `[Creature]`. EVERY `[Any]` leg must inherit
-        // `[Creature]`; the type-bearing leg is untouched. (The surface parser
-        // does not yet assemble a ≥3 color-only disjunction — comma/no-comma color
-        // chains are a separate gap — so we pin the distributor at its own seam,
-        // which is exactly the level `merge_or_filters` feeds.)
+        // `[Creature]`; the type-bearing leg is untouched. The surface parser now
+        // assembles ≥3-color prenominal chains (see
+        // `or_color_disjunction_three_colors_backfills_core_type`); this test pins
+        // the distributor at its own seam — exactly the level `merge_or_filters`
+        // feeds — independent of the surface grammar.
         let any_leg = |color: ManaColor| {
             TargetFilter::Typed(TypedFilter {
                 type_filters: vec![TypeFilter::Any],
