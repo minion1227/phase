@@ -12,9 +12,9 @@ use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityKind, CardTypeSetSource, ControllerRef,
     CopyRetargetPermission, CostPaidObjectSnapshot, Effect, EffectError, EffectKind,
     EffectOutcomeSignal, EffectScope, FilterProp, OpponentMayScope, PlayerFilter, PlayerScope,
-    QuantityExpr, QuantityRef, RepeatContinuation, ResolvedAbility, SacrificeCost,
-    SacrificeRequirement, SharedQuality, SharedQualityRelation, SubAbilityLink, TapStateChange,
-    TargetFilter, TargetRef, ThisWayCause,
+    QuantityExpr, QuantityRef, RepeatContinuation, ResolvedAbility, RevealUntilDisposition,
+    SacrificeCost, SacrificeRequirement, SharedQuality, SharedQualityRelation, SubAbilityLink,
+    TapStateChange, TargetFilter, TargetRef, ThisWayCause,
 };
 #[cfg(test)]
 use crate::types::ability::{AttackScope, AttackSubject};
@@ -3430,6 +3430,19 @@ fn affected_objects_from_events(
             })
             .flat_map(|ids| ids.iter().copied())
             .collect(),
+        // CR 701.20b: reveal-only RevealUntil (Sanar) publishes the full revealed
+        // pile from `CardsRevealed` — no zone changes occurred.
+        Effect::RevealUntil {
+            matched_disposition: RevealUntilDisposition::RevealOnly,
+            ..
+        } => events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::CardsRevealed { card_ids, .. } => Some(card_ids.as_slice()),
+                _ => None,
+            })
+            .flat_map(|ids| ids.iter().copied())
+            .collect(),
         _ => {
             let dest_zone = match effect {
                 Effect::ChangeZone { destination, .. }
@@ -4815,6 +4828,94 @@ fn resolve_chain_body(
     // REPLACE, not an append) — both leave `is_some()` true. Comparing the full
     // value catches the replace case correctly (issue #491).
     let pending_continuation_before = state.pending_continuation.clone();
+
+    // CR 603.3d + CR 601.2c: Multi-target-over-`Player` resolution fan-out.
+    // An "any number of target players each <verb>" trigger/spell announces a
+    // variable number of player targets when it goes on the stack (CR 601.2c,
+    // reached for triggers via CR 603.3d). The chosen player set lands in
+    // `ability.targets` as `TargetRef::Player` entries with `multi_target` set.
+    // Single-player-recipient effect handlers (`Discard`, `Mill`, `LoseLife`)
+    // resolve for only the FIRST `TargetRef::Player`, so without this branch a
+    // selection of two players discards only one. This fan-out is the missing
+    // iteration layer — a structural mirror of the `player_scope` loop above —
+    // recursing once per chosen player with `targets` narrowed to that one
+    // player and `multi_target` cleared.
+    //
+    // MUST run before the ConditionInstead "instead" swap below: swapping a
+    // `Mill { target: Player }` parent for a `Mill { target: ParentTarget }`
+    // rider (Court of Cunning — "each mill two … mills ten instead") clears
+    // `multi_target` and changes the effect's target filter, which would
+    // otherwise skip this branch and resolve only the first chosen player.
+    if ability.multi_target.is_some()
+        && effect_target_filter(&ability.effect) == Some(&TargetFilter::Player)
+    {
+        let chosen_players: Vec<PlayerId> = ability
+            .targets
+            .iter()
+            .filter_map(|t| match t {
+                TargetRef::Player(pid) => Some(*pid),
+                TargetRef::Object(_) => None,
+            })
+            .collect();
+        if chosen_players.len() != 1 {
+            // CR 601.2c: "any number of target players" permits zero targets.
+            // CR 608.2c: An ability resolving with zero chosen player targets
+            // does nothing — emit `EffectResolved` and stop BEFORE
+            // `resolve_effect`, whose `resolve_player_for_context_ref`
+            // controller fallback would otherwise wrongly resolve for the
+            // ability's controller. Exactly one chosen player falls through to
+            // the unchanged single-recipient fast path; only zero or >=2 are
+            // handled here.
+            if chosen_players.is_empty() {
+                events.push(GameEvent::EffectResolved {
+                    kind: crate::types::ability::EffectKind::from(&ability.effect),
+                    source_id: ability.source_id,
+                });
+                return Ok(());
+            }
+            // CR 101.4 + CR 608.2c: Resolve the effect once per chosen player in
+            // APNAP order — each player's `<verb>` (and its `sub_ability`, e.g.
+            // Tinybones' `Mill` + `LoseLife`) is one instruction applied to
+            // multiple subjects, followed in turn order.
+            let fanout_players: Vec<PlayerId> = crate::game::players::apnap_order(state)
+                .into_iter()
+                .filter(|pid| chosen_players.contains(pid))
+                .collect();
+            let initial_waiting_for = state.waiting_for.clone();
+            for (i, pid) in fanout_players.iter().enumerate() {
+                let mut narrowed = ability.clone();
+                narrowed.targets = vec![TargetRef::Player(*pid)];
+                narrowed.multi_target = None;
+                resolve_ability_chain(state, &narrowed, events, depth + 1)?;
+
+                // CR 608.2c: If an inner effect paused on a player choice (e.g.
+                // `WaitingFor::DiscardChoice` when a targeted player must pick
+                // which card to discard), stash the remaining players as a
+                // continuation chain and break — they resume via
+                // `drain_pending_continuation` after the choice resolves.
+                if state.waiting_for != initial_waiting_for {
+                    let remaining = &fanout_players[i + 1..];
+                    let mut tail: Option<Box<ResolvedAbility>> = None;
+                    for &remaining_pid in remaining.iter().rev() {
+                        let mut remaining_narrowed = ability.clone();
+                        remaining_narrowed.targets = vec![TargetRef::Player(remaining_pid)];
+                        remaining_narrowed.multi_target = None;
+                        if let Some(prev) = tail {
+                            super::ability_utils::append_to_sub_chain(
+                                &mut remaining_narrowed,
+                                *prev,
+                            );
+                        }
+                        tail = Some(Box::new(remaining_narrowed));
+                    }
+                    append_to_pending_continuation(state, tail);
+                    break;
+                }
+            }
+            return Ok(());
+        }
+    }
+
     // CR 608.2e: "Instead" kicker — check if a sub overrides the parent.
     // When condition is met, replace the current ability's effect with the sub's
     // effect, preserving the full resolution flow (tracked sets, continuations).
@@ -5099,87 +5200,6 @@ fn resolve_chain_body(
             }
         }
         return Ok(());
-    }
-
-    // CR 603.3d + CR 601.2c: Multi-target-over-`Player` resolution fan-out.
-    // An "any number of target players each <verb>" trigger/spell announces a
-    // variable number of player targets when it goes on the stack (CR 601.2c,
-    // reached for triggers via CR 603.3d). The chosen player set lands in
-    // `ability.targets` as `TargetRef::Player` entries with `multi_target` set.
-    // Single-player-recipient effect handlers (`Discard`, `Mill`, `LoseLife`)
-    // resolve for only the FIRST `TargetRef::Player`, so without this branch a
-    // selection of two players discards only one. This fan-out is the missing
-    // iteration layer — a structural mirror of the `player_scope` loop above —
-    // recursing once per chosen player with `targets` narrowed to that one
-    // player and `multi_target` cleared.
-    if ability.multi_target.is_some()
-        && effect_target_filter(&ability.effect) == Some(&TargetFilter::Player)
-    {
-        let chosen_players: Vec<PlayerId> = ability
-            .targets
-            .iter()
-            .filter_map(|t| match t {
-                TargetRef::Player(pid) => Some(*pid),
-                TargetRef::Object(_) => None,
-            })
-            .collect();
-        if chosen_players.len() != 1 {
-            // CR 601.2c: "any number of target players" permits zero targets.
-            // CR 608.2c: An ability resolving with zero chosen player targets
-            // does nothing — emit `EffectResolved` and stop BEFORE
-            // `resolve_effect`, whose `resolve_player_for_context_ref`
-            // controller fallback would otherwise wrongly resolve for the
-            // ability's controller. Exactly one chosen player falls through to
-            // the unchanged single-recipient fast path; only zero or >=2 are
-            // handled here.
-            if chosen_players.is_empty() {
-                events.push(GameEvent::EffectResolved {
-                    kind: crate::types::ability::EffectKind::from(&ability.effect),
-                    source_id: ability.source_id,
-                });
-                return Ok(());
-            }
-            // CR 101.4 + CR 608.2c: Resolve the effect once per chosen player in
-            // APNAP order — each player's `<verb>` (and its `sub_ability`, e.g.
-            // Tinybones' `Mill` + `LoseLife`) is one instruction applied to
-            // multiple subjects, followed in turn order.
-            let fanout_players: Vec<PlayerId> = crate::game::players::apnap_order(state)
-                .into_iter()
-                .filter(|pid| chosen_players.contains(pid))
-                .collect();
-            let initial_waiting_for = state.waiting_for.clone();
-            for (i, pid) in fanout_players.iter().enumerate() {
-                let mut narrowed = ability.clone();
-                narrowed.targets = vec![TargetRef::Player(*pid)];
-                narrowed.multi_target = None;
-                resolve_ability_chain(state, &narrowed, events, depth + 1)?;
-
-                // CR 608.2c: If an inner effect paused on a player choice (e.g.
-                // `WaitingFor::DiscardChoice` when a targeted player must pick
-                // which card to discard), stash the remaining players as a
-                // continuation chain and break — they resume via
-                // `drain_pending_continuation` after the choice resolves.
-                if state.waiting_for != initial_waiting_for {
-                    let remaining = &fanout_players[i + 1..];
-                    let mut tail: Option<Box<ResolvedAbility>> = None;
-                    for &remaining_pid in remaining.iter().rev() {
-                        let mut remaining_narrowed = ability.clone();
-                        remaining_narrowed.targets = vec![TargetRef::Player(remaining_pid)];
-                        remaining_narrowed.multi_target = None;
-                        if let Some(prev) = tail {
-                            super::ability_utils::append_to_sub_chain(
-                                &mut remaining_narrowed,
-                                *prev,
-                            );
-                        }
-                        tail = Some(Box::new(remaining_narrowed));
-                    }
-                    append_to_pending_continuation(state, tail);
-                    break;
-                }
-            }
-            return Ok(());
-        }
     }
 
     // CR 608.2c + CR 608.2d + CR 109.4: Resolution-time target binding for a
@@ -6562,6 +6582,27 @@ fn resolve_chain_body(
             // continuations inject chosen cards as targets.
             let mut sub_with_targets = sub.as_ref().clone();
             sub_with_targets.targets = inject_last_revealed_targets(state, ability, sub.as_ref());
+            apply_parent_chain_context(
+                &mut sub_with_targets,
+                ability,
+                effect_context_object.as_ref(),
+            );
+            resolve_ability_chain(state, &sub_with_targets, events, depth + 1)?;
+        } else if sub.targets.is_empty()
+            && !state.last_zone_changed_ids.is_empty()
+            && matches!(ability.effect, Effect::Draw { .. })
+            && matches!(sub.effect, Effect::Reveal { .. })
+        {
+            // CR 701.20a: "Draw N cards and reveal them" — the pronoun refers to
+            // the cards that just moved into the hand, not a separate library
+            // reveal. Forward the draw's ZoneChanged objects as reveal targets
+            // (Mad Wizard's Lair and the same draw-then-reveal class).
+            let mut sub_with_targets = sub.as_ref().clone();
+            sub_with_targets.targets = state
+                .last_zone_changed_ids
+                .iter()
+                .map(|&id| TargetRef::Object(id))
+                .collect();
             apply_parent_chain_context(
                 &mut sub_with_targets,
                 ability,

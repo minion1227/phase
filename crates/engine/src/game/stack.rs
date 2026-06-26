@@ -962,11 +962,25 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                                 });
                             }
                         }
+                        // CR 709.5d: a Room permanent enters with the unlocked
+                        // designation for whichever half was cast as a spell — the
+                        // right door when its right half was cast, otherwise the
+                        // left. `modal_back_face` (still set on the battlefield, see
+                        // zones.rs) records that the right half was the cast face.
+                        let cast_door = if state
+                            .objects
+                            .get(&entry.id)
+                            .is_some_and(|obj| obj.modal_back_face)
+                        {
+                            crate::game::game_object::RoomDoor::Right
+                        } else {
+                            crate::game::game_object::RoomDoor::Left
+                        };
                         super::room::unlock_door_designation(
                             state,
                             entry.id,
                             entry.controller,
-                            crate::game::game_object::RoomDoor::Left,
+                            cast_door,
                             events,
                         );
                     }
