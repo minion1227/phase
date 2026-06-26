@@ -3741,13 +3741,43 @@ where
     G: Fn(&crate::types::game_state::LKISnapshot) -> Option<i32>,
 {
     match scope {
-        // CR 608.2h + CR 603.10a: "this creature's power" / "its power" resolving
-        // to the ability's source (Nested Shambler's dies trigger). When the
-        // source has left the battlefield, its live P/T has been reverted to base
-        // by `revert_layered_characteristics_to_base`; prefer the buffed LKI
-        // snapshot via the shared guarded read.
+        // CR 608.2h: a source's P/T is read from the zone the ability EXPECTS it
+        // in. The expected zone differs by how the ability reached the stack:
+        //
+        //   * A triggered leaves-the-battlefield / dies ability (Nested
+        //     Shambler's "this creature's power") looks back at the battlefield
+        //     (CR 603.10a). The source has since moved to the graveyard and its
+        //     live layer-7 P/T was reverted to base by
+        //     `revert_layered_characteristics_to_base`, so prefer the buffed
+        //     battlefield LKI snapshot.
+        //   * An activated ability that functions from the graveyard or exile
+        //     (e.g. Scavenge's "this card's power", read while the card is in the
+        //     graveyard) expects the source in its CURRENT zone. Reading a stale
+        //     same-step battlefield LKI snapshot — left over from the card dying
+        //     earlier this step (`zones.rs` inserts it on leaving the
+        //     battlefield; it persists until step transition) — would wrongly
+        //     report the buffed battlefield P/T instead of the live graveyard
+        //     card's P/T. Read the live source in its current zone, falling back
+        //     to LKI only if the object has left the game entirely.
+        //
+        // `source_incarnation` is set exactly for triggered abilities (whose
+        // source can change zones between firing and resolution) and `None` for
+        // activated abilities and casts, so it distinguishes the battlefield
+        // look-back case from the current-zone case. A bare `resolve_quantity`
+        // call with no ability (statics, whose source is on the battlefield, and
+        // direct unit reads) defaults to the look-back read.
         ObjectScope::Source => {
-            read_object_pt_by_id(state, ctx.source, &obj_extract, &lki_extract).unwrap_or(0)
+            let expects_battlefield = ability.is_none_or(|a| a.source_incarnation.is_some());
+            if expects_battlefield {
+                read_object_pt_by_id(state, ctx.source, &obj_extract, &lki_extract).unwrap_or(0)
+            } else {
+                state
+                    .objects
+                    .get(&ctx.source)
+                    .and_then(&obj_extract)
+                    .or_else(|| state.lki_cache.get(&ctx.source).and_then(&lki_extract))
+                    .unwrap_or(0)
+            }
         }
         // CR 608.2h: once a targeted object has left the battlefield, its power
         // and toughness survive only as last known information. The object now
@@ -9595,6 +9625,68 @@ mod tests {
             resolve_quantity(&state, &power, PlayerId(0), source),
             4,
             "live battlefield power must win over stale LKI for an on-battlefield source"
+        );
+    }
+
+    /// CR 608.2h: an ACTIVATED ability that functions from the graveyard (e.g.
+    /// Scavenge's "this card's power", read while the card is in the graveyard)
+    /// expects its source in its current zone. It must read the live graveyard
+    /// card's (base) P/T, NOT a stale battlefield LKI snapshot left over from the
+    /// creature dying earlier this step. This is the counterpart to
+    /// `resolve_source_power_prefers_lki_when_source_left_battlefield`: same
+    /// off-battlefield source with a buffed LKI, but because the ability is
+    /// activated (`source_incarnation == None`) the live current-zone value wins.
+    /// Revert-failing: without the `expects_battlefield` gate the buffed LKI (3)
+    /// leaks through and the activated graveyard ability over-reports.
+    #[test]
+    fn resolve_source_power_reads_live_current_zone_for_activated_graveyard_ability() {
+        let mut state = GameState::new_two_player(42);
+        // The card sits in the graveyard with its (base) graveyard P/T.
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Scavenger".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let obj = state.objects.get_mut(&source).unwrap();
+            obj.base_power = Some(1);
+            obj.base_toughness = Some(1);
+            obj.power = Some(1);
+            obj.toughness = Some(1);
+            obj.card_types.core_types.push(CoreType::Creature);
+        }
+        // Stale buffed battlefield LKI from when the creature died earlier this step.
+        let mut lki = state.objects[&source].snapshot_public_characteristics();
+        lki.power = Some(3);
+        lki.toughness = Some(3);
+        state.lki_cache.insert(source, lki);
+
+        let power = QuantityExpr::Ref {
+            qty: QuantityRef::Power {
+                scope: ObjectScope::Source,
+            },
+        };
+        // An activated ability has no `source_incarnation` — it functions from
+        // the current (graveyard) zone, so the live base power must win.
+        let ability = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: power.clone(),
+                player: TargetFilter::Controller,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        assert!(
+            ability.source_incarnation.is_none(),
+            "activated-ability fixture must have no source incarnation"
+        );
+        assert_eq!(
+            resolve_quantity_with_targets(&state, &power, &ability),
+            1,
+            "activated graveyard-source ability must read live graveyard power (1), not buffed battlefield LKI (3)"
         );
     }
 
