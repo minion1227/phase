@@ -4992,6 +4992,36 @@ pub(super) fn strip_activated_constraints(text: &str) -> (String, ActivatedConst
             continue;
         }
 
+        // CR 602.5b + CR 602.5c: An "... and only once [each turn]" activation-limit
+        // rider can trail any timing restriction — "Activate only during your turn
+        // and only once" (Loch Larent), "... and only once each turn", etc. Each
+        // "activate only <timing>" arm above anchors on the literal "activate", so a
+        // conjoined rider is left stranded and the whole sentence would be dropped
+        // (the swallowed `ActivateOnlyDuring` clause, issue #2238). Peel the rider
+        // here and loop so the bare "activate only <timing>" core matches its own
+        // arm next pass — composing the limit and timing axes rather than
+        // enumerating every timing × limit pairing. Guarded on a preceding
+        // "activate only" clause so an effect sentence that merely ends in "and only
+        // once" is never mis-stripped. ("each turn" form first: longest match.)
+        for (rider, restriction) in [
+            (
+                " and only once each turn",
+                ActivationRestriction::OnlyOnceEachTurn,
+            ),
+            (" and only once", ActivationRestriction::OnlyOnce),
+        ] {
+            if let Some(prefix) = lower.strip_suffix(rider) {
+                if prefix.contains("activate only") {
+                    let end = remaining.len() - rider.len();
+                    remaining = remaining[..end]
+                        .trim_end_matches(|c: char| c == '.' || c == ',' || c.is_whitespace())
+                        .to_string();
+                    constraints.restrictions.push(restriction);
+                    continue 'parse_constraints;
+                }
+            }
+        }
+
         if let Some(prefix) = lower.strip_suffix("activate no more than twice each turn") {
             let end = remaining.len() - "activate no more than twice each turn".len();
             remaining = remaining[..end]
@@ -12038,6 +12068,57 @@ mod tests {
                 ActivationRestriction::AsSorcery,
                 ActivationRestriction::OnlyOnceEachTurn,
             ]
+        );
+    }
+
+    #[test]
+    fn parses_activate_only_timing_and_only_once_conjunction() {
+        // CR 602.5b/c + issue #2238: an "Activate only <timing> and only once"
+        // rider must record BOTH the timing restriction and the OnlyOnce limit.
+        // The per-timing arms anchor on "activate", so the conjoined "and only
+        // once" tail was stranded and the whole sentence dropped. The
+        // compositional rider-peel keeps both axes.
+        let r = parse(
+            "{T}: Add {R}. Activate only during your turn and only once.",
+            "Conjunction Probe",
+            &[],
+            &["Artifact"],
+            &[],
+        );
+        let restr = &r.abilities[0].activation_restrictions;
+        assert!(
+            restr.contains(&ActivationRestriction::DuringYourTurn),
+            "expected DuringYourTurn; got {restr:?}"
+        );
+        assert!(
+            restr.contains(&ActivationRestriction::OnlyOnce),
+            "expected OnlyOnce; got {restr:?}"
+        );
+    }
+
+    #[test]
+    fn loch_larent_activate_only_during_turn_and_only_once() {
+        // Issue #2238 (ActivateOnlyDuring swallow). Loch Larent's third ability
+        // ends "... Activate only during your turn and only once." Both the
+        // timing gate and the once-per-game limit must survive onto the ability.
+        let r = parse(
+            "{1}{U}, {T}: Scry 3. Target opponent gets a one-time boon with \"When you cast a creature spell, that creature enters tapped and with a stun counter on it.\" Activate only during your turn and only once.",
+            "Loch Larent",
+            &[],
+            &["Land"],
+            &[],
+        );
+        assert!(
+            r.abilities.iter().any(|a| a
+                .activation_restrictions
+                .contains(&ActivationRestriction::DuringYourTurn)
+                && a.activation_restrictions
+                    .contains(&ActivationRestriction::OnlyOnce)),
+            "Loch Larent's activated ability must carry both DuringYourTurn and OnlyOnce; got {:?}",
+            r.abilities
+                .iter()
+                .map(|a| &a.activation_restrictions)
+                .collect::<Vec<_>>()
         );
     }
 
