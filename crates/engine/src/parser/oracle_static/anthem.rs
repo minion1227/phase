@@ -4,7 +4,6 @@
 use super::prelude::*;
 #[allow(unused_imports)]
 use super::support::*;
-use crate::parser::oracle_util::split_around;
 
 /// Try to parse "[Subtype] creatures you control get/have ..." patterns.
 /// `text` is the original-case text starting at the subtype word.
@@ -791,13 +790,22 @@ pub(crate) fn parse_continuous_gets_has(
         let pt_lower = pt_text.to_lowercase();
         // CR 613.4c: the "gets +N/+M" verb may sit AFTER a leading keyword clause
         // ("equipped creature has first strike and gets +1/+0 for each ...",
-        // Glamdring), not only at the head of the clause. Locate it at any word
-        // boundary via `split_around` so the dynamic P/T is still extracted; the
+        // Glamdring), not only at the head of the clause. Scan word boundaries for
+        // the verb with `nom_tag_lower` (the multi-position phrase-scan idiom, cf.
+        // `scan_timing_restrictions`) so the dynamic P/T is still extracted; the
         // leading keyword is recovered separately via `extract_keyword_clause`.
-        let pt_source = split_around(&pt_lower, "gets ")
-            .or_else(|| split_around(&pt_lower, "get "))
-            .map(|(_, after)| after)
-            .unwrap_or(&pt_lower);
+        let mut pt_scan: &str = &pt_lower;
+        let pt_source = loop {
+            if let Some(rest) = nom_tag_lower(pt_scan, pt_scan, "gets ")
+                .or_else(|| nom_tag_lower(pt_scan, pt_scan, "get "))
+            {
+                break rest;
+            }
+            match pt_scan.find(' ') {
+                Some(idx) => pt_scan = pt_scan[idx + 1..].trim_start(),
+                None => break pt_lower.as_str(),
+            }
+        };
 
         if let Some((p, t)) = parse_pt_mod(pt_source) {
             if let Some(quantity) =
