@@ -5003,23 +5003,12 @@ pub(super) fn strip_activated_constraints(text: &str) -> (String, ActivatedConst
         // enumerating every timing × limit pairing. Guarded on a preceding
         // "activate only" clause so an effect sentence that merely ends in "and only
         // once" is never mis-stripped. ("each turn" form first: longest match.)
-        for (rider, restriction) in [
-            (
-                " and only once each turn",
-                ActivationRestriction::OnlyOnceEachTurn,
-            ),
-            (" and only once", ActivationRestriction::OnlyOnce),
-        ] {
-            if let Some(prefix) = lower.strip_suffix(rider) {
-                if prefix.contains("activate only") {
-                    let end = remaining.len() - rider.len();
-                    remaining = remaining[..end]
-                        .trim_end_matches(|c: char| c == '.' || c == ',' || c.is_whitespace())
-                        .to_string();
-                    constraints.restrictions.push(restriction);
-                    continue 'parse_constraints;
-                }
-            }
+        if let Some((kept_len, restriction)) = peel_only_once_rider(&lower) {
+            remaining = remaining[..kept_len]
+                .trim_end_matches(|c: char| c == '.' || c == ',' || c.is_whitespace())
+                .to_string();
+            constraints.restrictions.push(restriction);
+            continue 'parse_constraints;
         }
 
         if let Some(prefix) = lower.strip_suffix("activate no more than twice each turn") {
@@ -5242,6 +5231,40 @@ fn strip_condition_suffix(
     true
 }
 
+/// CR 602.5b + CR 602.5c: Peel a trailing "and only once [each turn]"
+/// activation-limit rider that conjoins onto an "activate only <timing>" clause
+/// ("Activate only during your turn and only once", Loch Larent). Forward nom
+/// combinators locate the rider (`take_until`) and confirm it trails an
+/// "activate only" clause, composing the limit axis with the timing axis rather
+/// than enumerating every timing × limit pairing. Returns the byte length of the
+/// text to keep (everything before the rider) and the limit restriction.
+fn peel_only_once_rider(lower: &str) -> Option<(usize, ActivationRestriction)> {
+    let (rider_onward, before) = take_until::<_, _, OracleError<'_>>(" and only once")
+        .parse(lower)
+        .ok()?;
+    // The rider must trail an "activate only ..." clause, never an effect
+    // sentence that merely ends in "and only once".
+    take_until::<_, _, OracleError<'_>>("activate only")
+        .parse(before)
+        .ok()?;
+    // "each turn" is the optional longest-match tail; the rider must end the line.
+    let (rest, each_turn) = preceded(
+        tag::<_, _, OracleError<'_>>(" and only once"),
+        opt(tag::<_, _, OracleError<'_>>(" each turn")),
+    )
+    .parse(rider_onward)
+    .ok()?;
+    if !rest.is_empty() {
+        return None;
+    }
+    let restriction = if each_turn.is_some() {
+        ActivationRestriction::OnlyOnceEachTurn
+    } else {
+        ActivationRestriction::OnlyOnce
+    };
+    Some((before.len(), restriction))
+}
+
 /// Strip trailing "X can't be 0." / "This ability can't be copied and X can't
 /// be 0." constraint annotations from Oracle text. These are activation/casting
 /// restrictions that annotate X-cost abilities but are not themselves effects.
@@ -5262,24 +5285,31 @@ fn strip_x_cant_be_zero_suffix(line: &str) -> String {
     // Activate only during your turn." — the trailing "Activate only during your
     // turn." must survive so the activated-ability parser still sees its timing
     // restriction. (Reminder text is already stripped by the caller, so a
-    // trailing parenthetical never reaches here.)
-    for suffix in [
-        ". this ability can't be copied and x can't be 0",
-        " this ability can't be copied and x can't be 0",
-        ". x can't be 0",
-        " x can't be 0",
+    // trailing parenthetical never reaches here.) The annotation is located with
+    // a forward `take_until` combinator (longest "this ability..." form first),
+    // not a string-method scan.
+    for (annotation, had_period) in [
+        (". this ability can't be copied and x can't be 0", true),
+        (" this ability can't be copied and x can't be 0", false),
+        (". x can't be 0", true),
+        (" x can't be 0", false),
     ] {
-        if let Some(pos) = trimmed.rfind(suffix) {
+        if let Ok((_, before)) = take_until::<_, _, OracleError<'_>>(annotation).parse(trimmed) {
+            let pos = before.len();
             let mut result = line[..pos].trim_end().to_string();
             // Preserve the sentence boundary the annotation occupied.
-            if suffix.starts_with('.') {
+            if had_period {
                 result.push('.');
             }
             // Re-attach any sentence that followed the annotation. The annotation
-            // ends at `pos + suffix.len()`, optionally followed by its own
-            // sentence-terminating '.'.
-            let after = line.get(pos + suffix.len()..).unwrap_or("");
-            let after = after.strip_prefix('.').unwrap_or(after).trim_start();
+            // ends at `pos + annotation.len()`, optionally followed by its own
+            // sentence-terminating '.' (peeled with a nom `opt(tag("."))`).
+            let after = line.get(pos + annotation.len()..).unwrap_or("");
+            let after = opt(tag::<_, _, OracleError<'_>>("."))
+                .parse(after)
+                .map(|(rest, _)| rest)
+                .unwrap_or(after)
+                .trim_start();
             if !after.is_empty() {
                 result.push(' ');
                 result.push_str(after);
