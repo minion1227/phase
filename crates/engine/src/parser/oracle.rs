@@ -5255,7 +5255,14 @@ fn strip_x_cant_be_zero_suffix(line: &str) -> String {
     ) {
         return String::new();
     }
-    // Suffix case: "... X can't be 0." at end of line
+    // Suffix / mid-line case: the "X can't be 0." annotation is EXCISED in place,
+    // never truncated. Everything before it is kept, and any sentence(s) that
+    // follow it on the same line are re-attached. Katara, Water Tribe's Hope is
+    // the witness (#2238): "Waterbend {X}: … until end of turn. X can't be 0.
+    // Activate only during your turn." — the trailing "Activate only during your
+    // turn." must survive so the activated-ability parser still sees its timing
+    // restriction. (Reminder text is already stripped by the caller, so a
+    // trailing parenthetical never reaches here.)
     for suffix in [
         ". this ability can't be copied and x can't be 0",
         " this ability can't be copied and x can't be 0",
@@ -5263,10 +5270,19 @@ fn strip_x_cant_be_zero_suffix(line: &str) -> String {
         " x can't be 0",
     ] {
         if let Some(pos) = trimmed.rfind(suffix) {
-            let mut result = line[..pos].to_string();
-            // Preserve trailing period if we stripped at a sentence boundary
+            let mut result = line[..pos].trim_end().to_string();
+            // Preserve the sentence boundary the annotation occupied.
             if suffix.starts_with('.') {
                 result.push('.');
+            }
+            // Re-attach any sentence that followed the annotation. The annotation
+            // ends at `pos + suffix.len()`, optionally followed by its own
+            // sentence-terminating '.'.
+            let after = line.get(pos + suffix.len()..).unwrap_or("");
+            let after = after.strip_prefix('.').unwrap_or(after).trim_start();
+            if !after.is_empty() {
+                result.push(' ');
+                result.push_str(after);
             }
             return result.trim_end().to_string();
         }
@@ -12068,6 +12084,33 @@ mod tests {
                 ActivationRestriction::AsSorcery,
                 ActivationRestriction::OnlyOnceEachTurn,
             ]
+        );
+    }
+
+    #[test]
+    fn katara_waterbend_activate_only_during_your_turn() {
+        // Issue #2238: Katara, Water Tribe's Hope. The "X can't be 0." annotation
+        // sits MID-ability ("… until end of turn. X can't be 0. Activate only
+        // during your turn."). `strip_x_cant_be_zero_suffix` used to truncate at
+        // the annotation, dropping the trailing "Activate only during your turn."
+        // so the timing gate was lost. The annotation is now excised in place,
+        // preserving the trailing sentence for the activated-ability parser.
+        let r = parse(
+            "Waterbend {X}: Creatures you control have base power and toughness X/X until end of turn. X can't be 0. Activate only during your turn.",
+            "Katara, Water Tribe's Hope",
+            &[],
+            &["Creature"],
+            &[],
+        );
+        assert!(
+            r.abilities.iter().any(|a| a
+                .activation_restrictions
+                .contains(&ActivationRestriction::DuringYourTurn)),
+            "Katara's Waterbend ability must carry DuringYourTurn; got {:?}",
+            r.abilities
+                .iter()
+                .map(|a| &a.activation_restrictions)
+                .collect::<Vec<_>>()
         );
     }
 
