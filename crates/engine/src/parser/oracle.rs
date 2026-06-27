@@ -4811,48 +4811,11 @@ pub(super) fn strip_activated_constraints(text: &str) -> (String, ActivatedConst
             continue;
         }
 
-        for (suffix, parsed) in [
-            (
-                "activate only as a sorcery and only once each turn",
-                vec![
-                    ActivationRestriction::AsSorcery,
-                    ActivationRestriction::OnlyOnceEachTurn,
-                ],
-            ),
-            (
-                "activate only as a sorcery and only once",
-                vec![
-                    ActivationRestriction::AsSorcery,
-                    ActivationRestriction::OnlyOnce,
-                ],
-            ),
-            (
-                "activate only during your turn and only once each turn",
-                vec![
-                    ActivationRestriction::DuringYourTurn,
-                    ActivationRestriction::OnlyOnceEachTurn,
-                ],
-            ),
-            (
-                "activate only during your upkeep and only once each turn",
-                vec![
-                    ActivationRestriction::DuringYourUpkeep,
-                    ActivationRestriction::OnlyOnceEachTurn,
-                ],
-            ),
-        ] {
-            if lower.ends_with(suffix) {
-                let end = remaining.len() - suffix.len();
-                remaining = remaining[..end]
-                    .trim_end_matches(|c: char| c == '.' || c == ',' || c.is_whitespace())
-                    .to_string();
-                constraints.restrictions.extend(parsed);
-                if remaining.is_empty() {
-                    break 'parse_constraints;
-                }
-                continue 'parse_constraints;
-            }
-        }
+        // CR 602.5b + CR 602.5c: "<timing> and only once [each turn]" pairings are
+        // NOT enumerated here. `peel_only_once_rider` (below) strips the limit
+        // rider and re-enters this loop so the bare "activate only <timing>" arm
+        // matches on the next pass — one composed suffix axis for the limit, one
+        // for the timing, rather than a hardcoded timing × limit table.
 
         if let Some(prefix) = lower.strip_suffix("activate only as a sorcery") {
             let end = remaining.len() - "activate only as a sorcery".len();
@@ -12108,12 +12071,23 @@ mod tests {
             &["Artifact"],
             &[],
         );
+        // Activation restrictions are an unordered set (each is enforced
+        // independently per CR 602.5), and the composed rider-peel records the
+        // limit and timing axes across two passes; assert membership + exact
+        // count rather than a brittle positional order.
+        let restr = &r.abilities[0].activation_restrictions;
         assert_eq!(
-            r.abilities[0].activation_restrictions,
-            vec![
-                ActivationRestriction::AsSorcery,
-                ActivationRestriction::OnlyOnceEachTurn,
-            ]
+            restr.len(),
+            2,
+            "expected exactly two restrictions; got {restr:?}"
+        );
+        assert!(
+            restr.contains(&ActivationRestriction::AsSorcery),
+            "expected AsSorcery; got {restr:?}"
+        );
+        assert!(
+            restr.contains(&ActivationRestriction::OnlyOnceEachTurn),
+            "expected OnlyOnceEachTurn; got {restr:?}"
         );
     }
 
