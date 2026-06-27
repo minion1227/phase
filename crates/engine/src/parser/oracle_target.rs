@@ -3374,7 +3374,8 @@ fn parse_color_prefix(text: &str) -> Option<(FilterProp, usize)> {
     //     onto every color-only leg.
     let consumed = if let Ok((after_space, _)) = tag::<_, _, OracleError<'_>>(" ").parse(rest) {
         text.len() - after_space.len()
-    } else if rest.starts_with(',') {
+    } else if peek(tag::<_, _, OracleError<'_>>(",")).parse(rest).is_ok() {
+        // Comma left in place for the `TYPE_SEPARATORS` recursion to consume.
         text.len() - rest.len()
     } else {
         return None;
