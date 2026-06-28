@@ -7976,7 +7976,14 @@ fn try_parse_event(
         // `parse_zone_change_clause`, the same building block the
         // disjunctive-condition path uses for Syr Konrad's "leaves graveyard"
         // clause, so the runtime `zone_change_clause_matches` path is shared.
-        if let Some(clause) = parse_zone_change_clause(subject, rest) {
+        // CR 603.4: peel the trailing "during your turn" intervening-if condition
+        // off the full verb phrase before the zone-change clause parser (which
+        // requires an empty tail) — the singular "card leaves your graveyard
+        // during your turn" form (Kishla Skimmer) otherwise collapses to Unknown.
+        // Mirrors the LeavesBattlefield branch above and the plural batched-leave
+        // path; `turn_condition` was already derived from the same trailing peel.
+        let (rest_peeled, _) = peel_trailing_turn_constraint(rest);
+        if let Some(clause) = parse_zone_change_clause(subject, rest_peeled) {
             let mut def = make_base();
             def.mode = TriggerMode::ChangesZone;
             // CR 113.6k + CR 603.10: a self-referential leaves trigger resolves
@@ -7987,6 +7994,9 @@ fn try_parse_event(
                 def.trigger_zones = vec![Zone::Battlefield, Zone::Graveyard, Zone::Exile];
             }
             def.zone_change_clauses = vec![clause];
+            if let Some(condition) = turn_condition {
+                def.condition = Some(condition);
+            }
             return Some((TriggerMode::ChangesZone, def));
         }
     }
@@ -14365,6 +14375,44 @@ mod tests {
         );
         assert_eq!(clause.destination, Some(Zone::Battlefield));
         assert_eq!(clause.valid_card, Some(TargetFilter::SelfRef));
+        assert!(def.execute.is_some());
+    }
+
+    /// CR 603.10a + CR 603.4 (issue #4521): Kishla Skimmer — "Whenever a card
+    /// leaves your graveyard during your turn, draw a card. This ability
+    /// triggers only once each turn." The singular leaves-a-graveyard form must
+    /// route through `ChangesZone` with a graveyard-origin clause AND carry the
+    /// trailing "during your turn" as a `DuringPlayersTurn { Controller }`
+    /// intervening-if. Before the fix the un-peeled "during your turn" suffix
+    /// made `parse_zone_change_clause` reject the clause and the trigger
+    /// collapsed to `Unknown` (never firing). The plural batched-leave path and
+    /// the `LeavesBattlefield` branch already peel this suffix; the singular
+    /// non-battlefield-zone branch did not.
+    #[test]
+    fn trigger_card_leaves_your_graveyard_during_your_turn_once_each_turn() {
+        let def = parse_trigger_line(
+            "Whenever a card leaves your graveyard during your turn, draw a card. \
+             This ability triggers only once each turn.",
+            "Kishla Skimmer",
+        );
+        assert_eq!(def.mode, TriggerMode::ChangesZone);
+        assert_eq!(def.zone_change_clauses.len(), 1);
+        let clause = &def.zone_change_clauses[0];
+        // CR 603.10a: origin is the graveyard; destination is unconstrained.
+        assert_eq!(clause.origin, OriginConstraint::Equals(Zone::Graveyard));
+        assert_eq!(clause.destination, None);
+        // CR 603.4: the "during your turn" suffix becomes an intervening-if.
+        assert_eq!(
+            def.condition,
+            Some(TriggerCondition::DuringPlayersTurn {
+                player: PlayerFilter::Controller,
+            }),
+        );
+        // CR 603.2h: "triggers only once each turn" → OncePerTurn.
+        assert_eq!(
+            def.constraint,
+            Some(crate::types::ability::TriggerConstraint::OncePerTurn),
+        );
         assert!(def.execute.is_some());
     }
 
