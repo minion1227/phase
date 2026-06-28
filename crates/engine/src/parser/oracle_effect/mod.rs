@@ -2852,7 +2852,8 @@ fn try_parse_airbend_clause(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
         }
     } else {
         Effect::ChangeZone {
-            origin: Some(Zone::Battlefield),
+            // Creatures leave the battlefield; spells leave the stack (issue #4384).
+            origin: None,
             destination: Zone::Exile,
             target,
             owner_library: false,
@@ -47254,9 +47255,14 @@ mod tests {
         assert_eq!(clause.multi_target, Some(MultiTargetSpec::fixed(0, 1)));
         match clause.effect {
             Effect::ChangeZone {
+                origin,
                 target: TargetFilter::Or { filters },
                 ..
             } => {
+                assert_eq!(
+                    origin, None,
+                    "single-target airbend must not pin origin to Battlefield (issue #4384)"
+                );
                 assert!(
                     filters.iter().any(|filter| matches!(
                         filter,
