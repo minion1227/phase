@@ -42995,6 +42995,100 @@ mod tests {
         }
     }
 
+    /// CR 107.4 + CR 202.1 + CR 603.2 + CR 603.4 (issue #4370): Namor the
+    /// Sub-Mariner — runtime cast-pipeline coverage. The parser-level shape is
+    /// asserted in `oracle_trigger`; these tests drive the whole cast → trigger
+    /// → token-creation pipeline to prove the count and the valid_card filter
+    /// behave at resolution time.
+    mod namor_colored_pip_cast_trigger {
+        use super::*;
+        use crate::game::scenario::{GameScenario, P0};
+        use crate::types::mana::{ManaCost, ManaCostShard, ManaUnit};
+
+        const NAMOR_ORACLE: &str = "Whenever you cast a noncreature spell with one or more blue mana symbols in its mana cost, create that many 1/1 blue Merfolk creature tokens.";
+
+        /// Count token permanents a player controls on the battlefield.
+        fn token_count(runner: &crate::game::scenario::GameRunner, player: PlayerId) -> usize {
+            runner
+                .state()
+                .objects
+                .values()
+                .filter(|o| o.zone == Zone::Battlefield && o.controller == player && o.is_token)
+                .count()
+        }
+
+        /// CR 107.4 + CR 603.4: casting a noncreature spell with two blue pips
+        /// ({U}{U}) while Namor is on the battlefield creates exactly two 1/1
+        /// blue Merfolk tokens — the count back-references the cast spell's
+        /// blue-pip count (`ManaSymbolsInManaCost { EventSource, Blue }`), not the
+        /// generic `EventContextAmount` (which would resolve to 0 tokens).
+        #[test]
+        fn casting_two_blue_pip_spell_creates_two_merfolk_tokens() {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            scenario.add_creature_from_oracle(P0, "Namor the Sub-Mariner", 5, 5, NAMOR_ORACLE);
+            // Noncreature spell with two blue pips: {U}{U}. Benign resolution.
+            let spell = scenario
+                .add_spell_to_hand_from_oracle(P0, "Twin-Pip Bolt", true, "You gain 1 life.")
+                .with_mana_cost(ManaCost::Cost {
+                    shards: vec![ManaCostShard::Blue, ManaCostShard::Blue],
+                    generic: 0,
+                })
+                .id();
+            // CR 601.2f: fund the {U}{U} cost from the pool so the driver auto-pays.
+            scenario.with_mana_pool(
+                P0,
+                vec![ManaUnit::new(ManaType::Blue, ObjectId(9_999), false, vec![]); 2],
+            );
+            let mut runner = scenario.build();
+
+            let outcome = runner.cast(spell).resolve();
+
+            assert_eq!(
+                token_count(&runner, P0),
+                2,
+                "two blue pips must create two Merfolk tokens, got {}",
+                token_count(&runner, P0)
+            );
+            // The spell itself still resolved (gain 1 life) on top of the trigger.
+            outcome.assert_life_delta(P0, 1);
+        }
+
+        /// CR 603.2 (issue #4370): a noncreature spell with NO blue mana symbols
+        /// ({R}) must NOT satisfy the trigger's `valid_card`
+        /// (`ManaSymbolCount { Blue, GE, 1 }`), so the trigger does not fire and
+        /// no tokens are created — the over-fire defect is fixed at runtime.
+        #[test]
+        fn casting_non_blue_spell_creates_no_tokens() {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            scenario.add_creature_from_oracle(P0, "Namor the Sub-Mariner", 5, 5, NAMOR_ORACLE);
+            // Noncreature spell with a single red pip and no blue: {R}.
+            let spell = scenario
+                .add_spell_to_hand_from_oracle(P0, "Red Spark", true, "You gain 1 life.")
+                .with_mana_cost(ManaCost::Cost {
+                    shards: vec![ManaCostShard::Red],
+                    generic: 0,
+                })
+                .id();
+            scenario.with_mana_pool(
+                P0,
+                vec![ManaUnit::new(ManaType::Red, ObjectId(9_999), false, vec![]); 1],
+            );
+            let mut runner = scenario.build();
+
+            let outcome = runner.cast(spell).resolve();
+
+            assert_eq!(
+                token_count(&runner, P0),
+                0,
+                "a non-blue spell must not fire Namor's trigger, got {} tokens",
+                token_count(&runner, P0)
+            );
+            outcome.assert_life_delta(P0, 1);
+        }
+    }
+
     /// CR 701.43a / CR 701.43b / CR 502.3: Exert cost — Arena of Glory class.
     mod exert_cost {
         use super::*;

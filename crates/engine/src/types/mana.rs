@@ -1295,6 +1295,34 @@ impl ManaCost {
         }
     }
 
+    /// CR 107.4 + CR 202.1: Count colored mana symbols in this mana cost.
+    /// `Some(c)` counts symbols contributing to color `c` (hybrid /
+    /// monocolored-hybrid / Phyrexian symbols included via
+    /// `ManaCostShard::contributes_to`). `None` counts each colored shard once
+    /// regardless of color — CR 107.4a/107.4e/107.4f: a hybrid or Phyrexian
+    /// symbol is a single colored mana symbol even though it is all of its
+    /// component colors, so `{G/W}{G/W}` counts as 2 (not 4). Generic, X,
+    /// colorless, and snow shards are not colored and never count.
+    /// `NoCost`/`SelfManaCost`/`SelfManaValue` have no per-shard cost → 0.
+    ///
+    /// Single counting authority shared by `QuantityRef::ManaSymbolsInManaCost`
+    /// (game/quantity.rs) and `FilterProp::ManaSymbolCount` (game/filter.rs).
+    pub fn count_colored_pips(&self, color: Option<ManaColor>) -> i32 {
+        match self {
+            ManaCost::Cost { shards, .. } => {
+                let count = shards
+                    .iter()
+                    .filter(|shard| match color {
+                        Some(c) => shard.contributes_to(c),
+                        None => ManaColor::ALL.iter().any(|c| shard.contributes_to(*c)),
+                    })
+                    .count();
+                i32::try_from(count).unwrap_or(i32::MAX)
+            }
+            ManaCost::NoCost | ManaCost::SelfManaCost | ManaCost::SelfManaValue => 0,
+        }
+    }
+
     /// CR 202.3e: X in a mana cost equals the announced value only while the
     /// object is on the stack; in every other zone, X contributes 0.
     pub fn mana_value_with_x(&self, zone: Zone, cost_x_paid: Option<u32>) -> u32 {

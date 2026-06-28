@@ -141,12 +141,14 @@ fn filter_prop_uses_object_population(prop: &FilterProp) -> bool {
         // single-object, or carry no QuantityExpr threshold, so a board entry/exit
         // cannot change whether a pre-existing object satisfies them.
         // `ColorCount` carries a `u8` constant, not a QuantityExpr.
+        // `ManaSymbolCount` reads only the candidate's own printed mana cost.
         FilterProp::CanEnchant { .. }
         | FilterProp::HasAttachment { .. }
         | FilterProp::HasAnyAttachmentOf { .. }
         | FilterProp::TargetsOnly { .. }
         | FilterProp::Targets { .. }
         | FilterProp::ColorCount { .. }
+        | FilterProp::ManaSymbolCount { .. }
         | FilterProp::ManaValueParity { .. }
         | FilterProp::Token
         | FilterProp::NonToken
@@ -357,6 +359,7 @@ fn entered_object_perturbs_filter_prop(
         | FilterProp::TargetsOnly { .. }
         | FilterProp::Targets { .. }
         | FilterProp::ColorCount { .. }
+        | FilterProp::ManaSymbolCount { .. }
         | FilterProp::ManaValueParity { .. }
         | FilterProp::Token
         | FilterProp::NonToken
@@ -2791,6 +2794,11 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         FilterProp::ManaValueParity { parity } => {
             mana_value_matches_parity_source(record.mana_value, parity, None)
         }
+        // CR 202.1: SpellCastRecord retains colors + mana_value but no per-shard
+        // ManaCost, so colored-pip count is unsupported here. RUNTIME: TODO.
+        // (Namor correctness comes from valid_card matching the live stack object
+        // via matches_filter_prop, not from this cast-history record.)
+        FilterProp::ManaSymbolCount { .. } => false,
         // CR 202.1: Exact printed mana cost is not captured in cast-history
         // snapshots. Fail closed rather than approximating with mana value
         // (CR 202.3), which would conflate {W} with {1}.
@@ -3305,6 +3313,14 @@ fn matches_filter_prop(
             let mana_value = obj.mana_cost.mana_value_with_x(obj.zone, obj.cost_x_paid);
             mana_value_matches_parity_source(mana_value, parity, state.last_named_choice.as_ref())
         }
+        // CR 107.4 + CR 202.1: count colored mana symbols in the object's printed
+        // mana cost via the single counting authority, then compare with the
+        // parameterized comparator (Namor's "with one or more blue mana symbols").
+        FilterProp::ManaSymbolCount {
+            color,
+            comparator,
+            value,
+        } => comparator.evaluate(obj.mana_cost.count_colored_pips(*color), *value),
         // CR 202.1: Compare exact printed mana cost, not mana value (CR 202.3).
         FilterProp::ManaCostIn { costs } => costs.iter().any(|cost| cost == &obj.mana_cost),
         // CR 702.143c-d: Foretold is a designation of a card in exile, tracked
@@ -3980,6 +3996,9 @@ fn zone_change_record_matches_property(
         // CR 202.1: Zone-change records currently snapshot mana value, not the
         // full printed mana cost. Exact-cost predicates fail closed here.
         FilterProp::ManaCostIn { .. } => false,
+        // CR 202.1: Zone-change record carries no per-shard ManaCost, so
+        // colored-pip count is unsupported here. RUNTIME: TODO.
+        FilterProp::ManaSymbolCount { .. } => false,
         // CR 105.1 / CR 202.2: Color membership on the event-time object.
         FilterProp::HasColor { color } => record.colors.contains(color),
         FilterProp::NotColor { color } => !record.colors.contains(color),

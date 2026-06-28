@@ -711,6 +711,25 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                 };
                 parts.push(label);
             }
+            FilterProp::ManaSymbolCount {
+                color,
+                comparator,
+                value,
+            } => {
+                let symbol = match color {
+                    Some(c) => format!("{c:?} mana symbol").to_lowercase(),
+                    None => "colored mana symbol".into(),
+                };
+                let label = match comparator {
+                    Comparator::GE => format!("≥{value} {symbol}"),
+                    Comparator::LE => format!("≤{value} {symbol}"),
+                    Comparator::GT => format!(">{value} {symbol}"),
+                    Comparator::LT => format!("<{value} {symbol}"),
+                    Comparator::EQ => format!("{value} {symbol}"),
+                    Comparator::NE => format!("≠{value} {symbol}"),
+                };
+                parts.push(label);
+            }
             FilterProp::HasSupertype { value } => {
                 parts.push(format!("{value}").to_lowercase());
             }
