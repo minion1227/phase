@@ -277,6 +277,7 @@ mod issue_2941_vivien_reid;
 mod issue_2943_kayas_wrath;
 mod issue_3127_reveal_otherwise_graveyard;
 mod issue_3245_abhorrent_oculus_manifest_dread;
+mod issue_3249_faiths_fetters;
 mod issue_3250_paladin_class;
 mod issue_3251_force_of_negation;
 mod issue_3252_rhythm_of_the_wild;
