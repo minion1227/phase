@@ -20996,6 +20996,17 @@ pub(crate) fn parse_effect_chain_ir(
             if let Some(sub) = inner_clause.sub_ability {
                 inner_def.sub_ability = Some(sub);
             }
+            // CR 118.12a (issue #4369): a payment-unless on the delayed
+            // instruction itself ("...next end step, sacrifice it unless you pay
+            // {cost}" — Ashling, the Limitless; Satya, Aetherflux Genius) is
+            // extracted at chunk level into `unless_pay`, but it belongs to the
+            // DELAYED sacrifice, not the outer trigger. Move it onto the inner
+            // delayed def and consume it so it is not also applied to the outer
+            // CreateDelayedTrigger wrapper. The trigger-level
+            // `extract_unless_pay_modifier` declines to hoist the same clause.
+            if let Some(up) = unless_pay.take() {
+                inner_def.unless_pay = Some(up);
+            }
             apply_where_x_ability_expression(&mut inner_def, where_x_expression.as_deref());
             let delayed_effect = Effect::CreateDelayedTrigger {
                 condition: prefix_condition.clone(),

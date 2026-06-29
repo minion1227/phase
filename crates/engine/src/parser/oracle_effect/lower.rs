@@ -4238,7 +4238,7 @@ pub(super) fn strip_temporal_suffix(text: &str) -> (&str, Option<DelayedTriggerC
 /// CR 603.7a: Strip temporal prefix indicating a delayed trigger condition.
 /// Symmetric to `strip_temporal_suffix` but handles prefix form:
 /// "At the beginning of the next end step, untap up to two lands."
-pub(super) fn strip_temporal_prefix(text: &str) -> (&str, Option<DelayedTriggerCondition>) {
+pub(crate) fn strip_temporal_prefix(text: &str) -> (&str, Option<DelayedTriggerCondition>) {
     let lower = text.to_lowercase();
     if let Some((condition, rest)) = nom_on_lower(text, &lower, |i| {
         alt((
