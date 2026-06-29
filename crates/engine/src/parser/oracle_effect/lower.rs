@@ -2552,6 +2552,13 @@ fn rewrite_populated_anaphor_in_effect(effect: &mut Effect) {
     // effect for any nested anaphors.
     if let Effect::CreateDelayedTrigger { effect: inner, .. } = effect {
         rewrite_parent_target_to_last_created(&mut inner.effect);
+        // CR 603.7c + CR 608.2c (issue #4601): a PHASE-triggered token-copier
+        // (Mishra, Eminent One — "At the beginning of combat on your turn,
+        // create a token …, Sacrifice it at the beginning of the next end step")
+        // has no triggering object, so the bare-"it" delayed cleanup lowers to
+        // `SelfRef` (the source) rather than `ParentTarget`/`TriggeringSource`.
+        // In this gated post-token scope the antecedent is the created token.
+        rewrite_delayed_cleanup_self_ref_to_last_created(&mut inner.effect);
         rewrite_populated_anaphor_in_effect(&mut inner.effect);
     }
 
@@ -2765,6 +2772,35 @@ pub(super) fn rewrite_parent_target_to_last_created(effect: &mut Effect) {
             ) {
                 *target = TargetFilter::LastCreated;
             }
+        }
+        _ => {}
+    }
+}
+
+/// CR 603.7c + CR 608.2c (issue #4601): the `SelfRef` companion to
+/// [`rewrite_parent_target_to_last_created`], for the inner effect of a
+/// `CreateDelayedTrigger` in the gated post-token-creator scope. A PHASE-
+/// triggered token-copier ("At the beginning of combat on your turn, create a
+/// token …, Sacrifice it at the beginning of the next end step" — Mishra,
+/// Eminent One) has no triggering object, so the imperative parser lowers the
+/// bare-"it" delayed cleanup to `SelfRef` (the source) instead of
+/// `ParentTarget`/`TriggeringSource`. The antecedent is still the just-created
+/// token, so rebind to `LastCreated`.
+///
+/// Scope is deliberately limited to the **destructive cleanup** effects that
+/// remove/move the temporary token (`Sacrifice`/`Destroy`/`Bounce`/
+/// `ChangeZone`). `Pump`/`Attach`/`SetTapState` are excluded: there a delayed
+/// `SelfRef` ("~ gets +1/+1 until end of turn") more plausibly means the
+/// source, so leaving it as `SelfRef` is correct.
+fn rewrite_delayed_cleanup_self_ref_to_last_created(effect: &mut Effect) {
+    match effect {
+        Effect::Sacrifice { target, .. }
+        | Effect::Destroy { target, .. }
+        | Effect::Bounce { target, .. }
+        | Effect::ChangeZone { target, .. }
+            if matches!(target, TargetFilter::SelfRef) =>
+        {
+            *target = TargetFilter::LastCreated;
         }
         _ => {}
     }
