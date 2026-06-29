@@ -512,7 +512,7 @@ mod tests {
         }
     }
 
-    /// CR 111.1 (issue #4605): Urza's Saga chapter II grants
+    /// CR 111.3 (issue #4605): Urza's Saga chapter II grants
     /// `{2}, {T}: Create a 0/0 colorless Construct artifact creature token with
     /// 'This token gets +1/+1 for each artifact you control.'`. Because the
     /// create-token clause is nested inside the double-quoted granted ability,

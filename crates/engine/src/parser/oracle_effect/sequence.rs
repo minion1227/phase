@@ -550,7 +550,7 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
     let mut chars = text.chars().peekable();
     let mut paren_depth = 0usize;
     let mut in_single_quote = false;
-    // CR 111.1 (issue #4605): a created token has the abilities defined in its
+    // CR 111.3 (issue #4605): a created token has the abilities defined in its
     // creation effect. Tracks whether the currently-open single-quoted span is a
     // genuine NESTED ability quote — the inner ability of a token/permanent
     // created inside a double-quoted granted ability (Urza's Saga:
@@ -650,7 +650,7 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
             // split here and reset the phantom single-quote state.
             // `in_double_quote` (a genuine quoted ability) still suppresses the
             // split.
-            // CR 111.1 (issue #4605): inside a genuine nested ability quote
+            // CR 111.3 (issue #4605): inside a genuine nested ability quote
             // (`single_quote_is_ability`) the `.` belongs to the quoted text
             // (`... with 'This token gets +1/+1 for each artifact you control.'`)
             // and must NOT close the clause — otherwise the span is bisected and
@@ -2474,17 +2474,17 @@ fn starts_with_damage_clause(lower: &str) -> bool {
     }
 }
 
-/// CR 111.1 (issue #4605): true when the text accumulated right before an
+/// CR 111.3 (issue #4605): true when the text accumulated right before an
 /// apostrophe ends at a phrase boundary that opens a nested quoted ability
 /// (`with '` / `and '` / `or '` / `, '`). Mirrors the opener anchors in
 /// `extract_token_static_abilities`'s single-quote pass, so a possessive
 /// (`~'s`) or contraction (`can't`) apostrophe is never treated as an
 /// ability-quote opener and a sentence-ending `.` keeps splitting normally.
 fn ends_with_single_quote_ability_anchor(current: &str) -> bool {
-    current.ends_with("with ")
-        || current.ends_with("and ")
-        || current.ends_with("or ")
-        || current.ends_with(", ")
+    // allow-noncombinator: terminal suffix probe on the incremental chunk buffer during the char scan in `split_clause_sequence`, not parsing dispatch against raw oracle text (mirrors `current_ends_with_bare_and`).
+    ["with ", "and ", "or ", ", "]
+        .iter()
+        .any(|anchor| current.ends_with(anchor))
 }
 
 pub(super) fn is_possessive_apostrophe(current: &str, next: Option<char>) -> bool {
