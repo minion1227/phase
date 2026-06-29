@@ -2754,7 +2754,13 @@ pub(super) fn rewrite_parent_target_to_last_created(effect: &mut Effect) {
         }
         | Effect::Pump { target, .. }
         | Effect::Attach { target, .. }
-        | Effect::ChangeZone { target, .. } => {
+        | Effect::ChangeZone { target, .. }
+        // CR 603.7c + CR 608.2c (issue #4601 review): a delayed cleanup that
+        // puts the temporary token on top/bottom of a library ("… put it on the
+        // bottom of its owner's library at the beginning of the next end step")
+        // lowers its bare-"it" to `ParentTarget`/`TriggeringSource` just like the
+        // other move/cleanup forms — rebind to the created token.
+        | Effect::PutAtLibraryPosition { target, .. } => {
             // CR 603.7c + CR 608.2c: inside an ETB-triggered token-copier (e.g.
             // Flameshadow Conjuring / Inalla: "create a token that's a copy of
             // that creature. … Exile it at the beginning of the next end step"),
@@ -2789,15 +2795,20 @@ pub(super) fn rewrite_parent_target_to_last_created(effect: &mut Effect) {
 ///
 /// Scope is deliberately limited to the **destructive cleanup** effects that
 /// remove/move the temporary token (`Sacrifice`/`Destroy`/`Bounce`/
-/// `ChangeZone`). `Pump`/`Attach`/`SetTapState` are excluded: there a delayed
-/// `SelfRef` ("~ gets +1/+1 until end of turn") more plausibly means the
-/// source, so leaving it as `SelfRef` is correct.
+/// `ChangeZone`/`PutAtLibraryPosition`). `Pump`/`Attach`/`SetTapState` are
+/// excluded: there a delayed `SelfRef` ("~ gets +1/+1 until end of turn") more
+/// plausibly means the source, so leaving it as `SelfRef` is correct.
 fn rewrite_delayed_cleanup_self_ref_to_last_created(effect: &mut Effect) {
     match effect {
         Effect::Sacrifice { target, .. }
         | Effect::Destroy { target, .. }
         | Effect::Bounce { target, .. }
         | Effect::ChangeZone { target, .. }
+        // CR 603.7c (issue #4601 review): a delayed cleanup that puts the
+        // temporary token on top/bottom of a library ("… put it on the bottom
+        // of its owner's library at the beginning of the next end step") has the
+        // same "it" anaphor — bind it to the created token, not the source.
+        | Effect::PutAtLibraryPosition { target, .. }
             if matches!(target, TargetFilter::SelfRef) =>
         {
             *target = TargetFilter::LastCreated;
