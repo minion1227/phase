@@ -160,8 +160,10 @@ fn players_for_filter(
                 .map(|player| player.id)
                 .collect()
         }
-        // CR 102.2 + CR 603.2: Each opponent of the triggering (casting) player.
-        // Fail closed (empty) when no trigger event anchors the caster.
+        // CR 102.2 + CR 102.3 + CR 603.2: Each opponent of the triggering
+        // (casting) player, CR 102.3-aware via `players::is_opponent` (teammates
+        // in 2HG are not opponents). Fail closed (empty) when no trigger event
+        // anchors the caster.
         PlayerFilter::OpponentOfTriggeringPlayer => {
             let caster = state
                 .current_trigger_event
@@ -170,7 +172,11 @@ fn players_for_filter(
             state
                 .players
                 .iter()
-                .filter(|player| !player.is_eliminated && caster.is_some_and(|c| player.id != c))
+                .filter(|player| {
+                    !player.is_eliminated
+                        && caster
+                            .is_some_and(|c| crate::game::players::is_opponent(state, c, player.id))
+                })
                 .map(|player| player.id)
                 .collect()
         }
