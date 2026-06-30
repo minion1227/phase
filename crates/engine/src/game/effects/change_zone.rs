@@ -662,6 +662,12 @@ pub fn resolve(
         state.devour_eligible_snapshot = Some(state.battlefield.iter().copied().collect());
     }
 
+    // CR 608.2c: "that many" in a later instruction refers back to the number
+    // of objects this targeted move actually relocated (e.g. Vengeful Regrowth:
+    // "Return up to three target land cards ... Create that many ... tokens").
+    // Tracked the same way the mass `resolve_all` path counts, so the chained
+    // sub-ability's `QuantityRef::EventContextAmount` resolves correctly.
+    let mut moved_count: i32 = 0;
     for (i, obj_id) in targeted_objects.iter().enumerate() {
         if dest_zone == Zone::Exile {
             let acting_player = state
@@ -679,6 +685,19 @@ pub fn resolve(
             }
         }
 
+        // CR 608.2c: snapshot the pre-move zone so the post-move check below
+        // counts only objects this move actually relocated to the destination
+        // (a no-op or replacement-prevented move returns `Done` without moving).
+        // Mirrors the mass path's `departed`/`moved_count` accounting and the
+        // drain's resume-side increment.
+        let before_zone = state.objects.get(obj_id).map(|object| object.zone);
+        let moved_to_dest = |state: &GameState| {
+            before_zone != Some(dest_zone)
+                && state
+                    .objects
+                    .get(obj_id)
+                    .is_some_and(|object| object.zone == dest_zone)
+        };
         let per_obj_ctx = ChangeZoneIterationCtx {
             enter_with_counters: enter_with_counters_for_object(
                 state,
@@ -690,8 +709,15 @@ pub fn resolve(
             ..ctx.clone()
         };
         match process_one_zone_move(state, &per_obj_ctx, *obj_id, events) {
-            ZoneMoveResult::Done => {}
+            ZoneMoveResult::Done => {
+                if moved_to_dest(state) {
+                    moved_count += 1;
+                }
+            }
             ZoneMoveResult::NeedsAuraAttachmentChoice => {
+                if moved_to_dest(state) {
+                    moved_count += 1;
+                }
                 state.pending_change_zone_iteration =
                     Some(crate::types::game_state::PendingChangeZoneIteration {
                         remaining: targeted_objects[i + 1..].to_vec(),
@@ -709,7 +735,10 @@ pub fn resolve(
                             .clone(),
                         duration: ctx.duration.clone(),
                         track_exiled_by_source: ctx.track_exiled_by_source,
-                        moved_count: None,
+                        // CR 608.2c: carry the running count so the drain stamps
+                        // `last_effect_count` with the full targeted-move total
+                        // when the resumed iteration completes.
+                        moved_count: Some(moved_count),
                         // CR 708.2a + CR 708.3: preserve the face-down profile so
                         // the resumed members of a paused face-down return still
                         // enter face down.
@@ -742,7 +771,10 @@ pub fn resolve(
                             .clone(),
                         duration: ctx.duration.clone(),
                         track_exiled_by_source: ctx.track_exiled_by_source,
-                        moved_count: None,
+                        // CR 608.2c: carry the running count so the drain stamps
+                        // `last_effect_count` with the full targeted-move total
+                        // when the resumed iteration completes.
+                        moved_count: Some(moved_count),
                         // CR 708.2a + CR 708.3: preserve the face-down profile so
                         // the resumed members of a paused face-down return still
                         // enter face down.
@@ -763,6 +795,13 @@ pub fn resolve(
     // CR 614.13a: targeted multi-ChangeZone co-entry completed without pausing —
     // clear the pre-entry Devour snapshot (its lifetime = this entry event).
     let _ = state.devour_eligible_snapshot.take();
+
+    // CR 608.2c: record how many objects this targeted move relocated so a
+    // downstream sub-ability's `QuantityRef::EventContextAmount` ("that many")
+    // resolves to the actual count — mirrors the mass `resolve_all` tail and the
+    // single-object branches above. (The paused path defers this stamp to the
+    // drain, which owns the trailing `EffectResolved`.)
+    state.last_effect_count = Some(moved_count);
 
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),
@@ -5316,6 +5355,66 @@ mod tests {
             state.last_effect_count,
             Some(3),
             "ChangeZoneAll must record moved-object count for EventContextAmount consumers"
+        );
+    }
+
+    /// CR 608.2c: A *targeted* multi-object `ChangeZone` must set
+    /// `last_effect_count` to the number of objects it moved, exactly like the
+    /// mass `resolve_all` path and the single-object branches — so a chained
+    /// "that many" sub-ability (`QuantityRef::EventContextAmount`) resolves
+    /// correctly. Vengeful Regrowth class: "Return up to three target land cards
+    /// from your graveyard to the battlefield tapped. Create that many ...
+    /// tokens." (Regression: this path previously left `last_effect_count`
+    /// unstamped, so "that many" read a stale count — issue #1093.)
+    #[test]
+    fn targeted_multi_change_zone_records_moved_count_for_event_context_amount() {
+        let mut state = GameState::new_two_player(42);
+        let g1 = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Land A".into(),
+            Zone::Graveyard,
+        );
+        let g2 = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Land B".into(),
+            Zone::Graveyard,
+        );
+        // A stale prior count must not survive: the targeted move overwrites it.
+        state.last_effect_count = Some(99);
+
+        let ability = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Battlefield,
+                target: TargetFilter::Any,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Tapped,
+                enters_attacking: false,
+                up_to: true,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+            },
+            vec![TargetRef::Object(g1), TargetRef::Object(g2)],
+            ObjectId(500),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(state.battlefield.contains(&g1));
+        assert!(state.battlefield.contains(&g2));
+        assert_eq!(
+            state.last_effect_count,
+            Some(2),
+            "targeted multi-object ChangeZone must record moved-object count for \
+             EventContextAmount consumers (Vengeful Regrowth 'create that many')"
         );
     }
 
