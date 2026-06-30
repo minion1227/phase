@@ -782,6 +782,14 @@ pub fn resolve(
                         library_placement: ctx.library_placement,
                         effect_kind: EffectKind::from(&ability.effect),
                     });
+                // CR 608.2c: this object is paused mid-move on a replacement choice
+                // and will be delivered by the replacement resume (NOT by the drain's
+                // `remaining` loop). Record it as in-flight, with its pre-move zone, so
+                // the drain counts it toward `moved_count` once it reaches the
+                // destination — otherwise a downstream "that many" undercounts by one.
+                if let Some(before) = before_zone {
+                    state.pending_change_zone_in_flight = Some((*obj_id, before));
+                }
                 // CR 614.12a: park (don't clobber) — a Devour as-enters sacrifice
                 // may already have surfaced its own `EffectZoneChoice`.
                 crate::game::replacement::park_waiting_for(state, player);
@@ -1368,6 +1376,11 @@ pub fn resolve_all(
                         library_placement: effect_library_position.clone(),
                         effect_kind: EffectKind::from(&ability.effect),
                     });
+                // CR 608.2c: record the replacement-paused member as in-flight (with
+                // its pre-move zone) so the drain counts it once delivered — mirrors
+                // the targeted loop, keeping "that many" correct across a mass-move
+                // replacement pause.
+                state.pending_change_zone_in_flight = Some((obj_id, per_object_origin));
                 crate::game::replacement::park_waiting_for(state, player);
                 return Ok(());
             }
@@ -7142,6 +7155,79 @@ mod tests {
             assert!(state.objects[&shock].tapped);
         }
         assert!(state.pending_change_zone_iteration.is_none());
+    }
+
+    /// CR 608.2c (issue #1093 review): every member of a targeted multi-object
+    /// `ChangeZone` that pauses on a per-permanent replacement CHOICE is
+    /// delivered by the replacement resume, NOT by the iteration drain's
+    /// `remaining` loop. The moved count must still include each such in-flight
+    /// member so a downstream `QuantityRef::EventContextAmount` ("create/draw
+    /// that many") sees the full total. Three shocks each pause then enter the
+    /// battlefield (declined → tapped); `last_effect_count` must be `Some(3)` —
+    /// without the in-flight accounting the paused members are uncounted (the
+    /// move never returns `Done` in `remaining`), undercounting to `Some(0)`.
+    #[test]
+    fn targeted_multi_change_zone_counts_replacement_paused_members() {
+        use crate::game::engine::apply_as_current;
+        use crate::types::actions::GameAction;
+
+        let mut state = GameState::new_two_player(42);
+        let s1 = add_shock_in_library_for_test(&mut state, 901, PlayerId(0));
+        let s2 = add_shock_in_library_for_test(&mut state, 902, PlayerId(0));
+        let s3 = add_shock_in_library_for_test(&mut state, 903, PlayerId(0));
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+
+        let ability = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Library),
+                destination: Zone::Battlefield,
+                target: TargetFilter::Any,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: true,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+            },
+            vec![
+                TargetRef::Object(s1),
+                TargetRef::Object(s2),
+                TargetRef::Object(s3),
+            ],
+            ObjectId(100),
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        // Each shock pauses on its `Moved` replacement; decline (index 1) so it
+        // still enters the battlefield (tapped) — i.e. it reaches the destination.
+        for _ in 0..3 {
+            assert!(
+                matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
+                "expected a ReplacementChoice pause for each member"
+            );
+            let _ = apply_as_current(&mut state, GameAction::ChooseReplacement { index: 1 })
+                .expect("decline shock");
+        }
+
+        assert!(state.pending_change_zone_iteration.is_none());
+        assert!(state.pending_change_zone_in_flight.is_none());
+        for shock in [s1, s2, s3] {
+            assert_eq!(state.objects[&shock].zone, Zone::Battlefield);
+        }
+        // CR 608.2c: all three relocated members counted, despite each being
+        // delivered by the replacement resume rather than the iteration drain.
+        assert_eq!(
+            state.last_effect_count,
+            Some(3),
+            "moved count must include every replacement-paused member"
+        );
     }
 
     /// CR 614.12b: covers the parallel fix at
