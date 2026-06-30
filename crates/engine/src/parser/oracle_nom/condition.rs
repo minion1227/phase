@@ -4309,6 +4309,10 @@ fn parse_life_history_condition(input: &str) -> OracleResult<'_, StaticCondition
         parse_player_lost_life_this_turn,
         // "you gained life this turn" / "you gained N or more life this turn"
         parse_you_gained_life_this_turn,
+        // "you lost life this turn" / "you lost N or more life this turn" — the
+        // controller-scoped mirror of the gained sibling (was the only missing
+        // subject in the gained/lost × you/opponent/player matrix).
+        parse_you_lost_life_this_turn,
     ))
     .parse(input)
 }
@@ -4919,6 +4923,46 @@ fn parse_you_gained_life_this_turn(input: &str) -> OracleResult<'_, StaticCondit
         rest,
         make_quantity_ge(
             QuantityRef::LifeGainedThisTurn {
+                player: PlayerScope::Controller,
+            },
+            1,
+        ),
+    ))
+}
+
+/// CR 119.3 + CR 603.4: Parse "you lost [N or more] life this turn".
+///
+/// Controller-scoped mirror of `parse_you_gained_life_this_turn`. The opponent
+/// and any-player subjects already parse (`parse_opponent_lost_life_this_turn`,
+/// `parse_player_lost_life_this_turn`) and the controller *gained* subject
+/// parses too — only "you lost …" was missing, so phase-trigger intervening-ifs
+/// such as The Book of Vile Darkness ("if you lost 2 or more life this turn,
+/// create a 2/2 black Zombie") silently dropped their condition. Resolves via
+/// the existing `LifeLostThisTurn { Controller }` QuantityRef — no new variants.
+fn parse_you_lost_life_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = alt((tag("you lost "), tag("you've lost "))).parse(input)?;
+    // Try "N or more life this turn".
+    if let Ok((after_n, n)) = parse_number(rest) {
+        let after_n = after_n.trim_start();
+        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("or more life this turn").parse(after_n)
+        {
+            return Ok((
+                rest,
+                make_quantity_ge(
+                    QuantityRef::LifeLostThisTurn {
+                        player: PlayerScope::Controller,
+                    },
+                    n,
+                ),
+            ));
+        }
+    }
+    // "life this turn" (minimum 1).
+    let (rest, _) = tag("life this turn").parse(rest)?;
+    Ok((
+        rest,
+        make_quantity_ge(
+            QuantityRef::LifeLostThisTurn {
                 player: PlayerScope::Controller,
             },
             1,
