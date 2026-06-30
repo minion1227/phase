@@ -7230,6 +7230,119 @@ mod tests {
         );
     }
 
+    /// CR 608.2c (issue #1093 review, [HIGH]): a production `ChangeZone -> create
+    /// that many` chain whose returns each pause on a per-target replacement
+    /// CHOICE must still create the correct number of tokens. The chained
+    /// `Token { count: EventContextAmount }` consumer is drained only AFTER the
+    /// ChangeZone iteration completes and stamps `last_effect_count`, so it reads
+    /// the full post-resume moved count (3), not the stale pre-pause count (0).
+    /// Mirrors Vengeful Regrowth ("Return up to three target land cards ... Create
+    /// that many ... tokens") when a per-permanent replacement intervenes.
+    #[test]
+    fn change_zone_then_create_that_many_counts_across_replacement_pause() {
+        use crate::game::engine::apply_as_current;
+        use crate::types::ability::{PtValue, QuantityExpr, QuantityRef};
+        use crate::types::actions::GameAction;
+
+        let mut state = GameState::new_two_player(42);
+        let s1 = add_shock_in_library_for_test(&mut state, 911, PlayerId(0));
+        let s2 = add_shock_in_library_for_test(&mut state, 912, PlayerId(0));
+        let s3 = add_shock_in_library_for_test(&mut state, 913, PlayerId(0));
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+
+        // Build the chain exactly as the parser produces Vengeful Regrowth:
+        //   ChangeZone{Library->Battlefield, [s1,s2,s3]}
+        //     └─ Token{name:"Plant", count: EventContextAmount}
+        let create_tokens = ResolvedAbility::new(
+            Effect::Token {
+                name: "Plant".to_string(),
+                power: PtValue::Fixed(4),
+                toughness: PtValue::Fixed(2),
+                types: vec!["Creature".to_string()],
+                colors: vec![],
+                keywords: vec![],
+                tapped: false,
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                },
+                owner: TargetFilter::Controller,
+                attach_to: None,
+                enters_attacking: false,
+                supertypes: vec![],
+                static_abilities: vec![],
+                enter_with_counters: vec![],
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let ability = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Library),
+                destination: Zone::Battlefield,
+                target: TargetFilter::Any,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: true,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+            },
+            vec![
+                TargetRef::Object(s1),
+                TargetRef::Object(s2),
+                TargetRef::Object(s3),
+            ],
+            ObjectId(100),
+            PlayerId(0),
+        );
+
+        // Pause the ChangeZone on the first returned card's replacement — the
+        // targeted `resolve` installs the `ReplacementChoice` + the paused
+        // iteration carrier — then stash the "create that many" continuation
+        // exactly as `resolve_ability_chain` does when a parent effect pauses
+        // mid-resolution. The resume path (`drain_pending_continuation`) then
+        // exercises the fix: the ChangeZone iteration drains and stamps the count
+        // BEFORE this continuation runs.
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        assert!(
+            matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
+            "first returned card must pause on its replacement"
+        );
+        state.pending_continuation = Some(crate::types::game_state::PendingContinuation::new(
+            Box::new(create_tokens),
+        ));
+
+        // Decline each replacement; each returned card still enters (tapped).
+        for _ in 0..3 {
+            assert!(
+                matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
+                "expected a ReplacementChoice pause per returned member"
+            );
+            let _ = apply_as_current(&mut state, GameAction::ChooseReplacement { index: 1 })
+                .expect("decline shock");
+        }
+
+        // CR 608.2c: the chained "create that many" ran AFTER the ChangeZone
+        // iteration completed and stamped the count, so it created one token per
+        // returned card. Pre-fix (continuation drained before the iteration) it
+        // would have read a stale count and created the wrong number.
+        let plant_tokens = state
+            .objects
+            .values()
+            .filter(|o| o.name == "Plant" && o.zone == Zone::Battlefield)
+            .count();
+        assert_eq!(
+            plant_tokens, 3,
+            "create-that-many must see the full post-resume moved count (3), not the stale pre-pause count"
+        );
+    }
+
     /// CR 614.12b: covers the parallel fix at
     /// `engine_resolution_choices.rs::EffectZoneChoice` — the multi-card loop
     /// for untargeted "put X cards from your hand onto the battlefield"
