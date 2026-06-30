@@ -10,7 +10,7 @@ expression: "&ir"
         "effect": {
           "type": "Choose",
           "choice_type": "Color",
-          "persist": false
+          "persist": true
         },
         "cost": {
           "type": "Tap"

@@ -19203,7 +19203,18 @@ fn inject_chosen_color_choice_grant(def: &mut AbilityDefinition, parent_is_color
             &mut def.effect,
             Box::new(Effect::Choose {
                 choice_type: ChoiceType::color(),
-                persist: false,
+                // CR 607.2d + CR 613.1: `persist: true` so the choice resolver
+                // carries `source_id` into `WaitingFor::NamedChoice`; answering
+                // it then routes through `bind_named_choice`, which writes
+                // `ChosenAttribute::Color` onto the granting source and re-runs
+                // layers. The layer applier reads that color off the source
+                // (`game/layers.rs` `chosen_color` pre-read) to bake the grant's
+                // `Protection`/`HexproofFrom(ChosenColor)` into a concrete color.
+                // With `persist: false` no `source_id` is stored, the source
+                // never gets a chosen color, and the grant resolves to a no-op
+                // (issue #4371). Matches `try_parse_become_choice`'s persisted
+                // `AddChosenColor` choice.
+                persist: true,
                 selection: crate::types::ability::TargetSelectionMode::Chosen,
             }),
         );
