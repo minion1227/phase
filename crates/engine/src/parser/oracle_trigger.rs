@@ -11190,6 +11190,36 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
         }
     }
 
+    // CR 603.8: "when you control a [filter]" — the positive-existence sibling of
+    // the "control no [filter]" arm above. Fires whenever the controller controls
+    // a permanent matching the filter (Endangered Armodon: "When you control a
+    // creature with toughness 2 or less, sacrifice this creature."). Filter
+    // recognition is delegated to `parse_inner_condition` (the shared game-state
+    // condition authority) and bridged to `TriggerCondition::ControlsType` via
+    // `static_condition_to_trigger_condition`, so every presence filter the
+    // condition parser already handles (subtype, type, P/T comparator, keyword,
+    // …) is covered without re-implementing filter parsing here. Gated on a
+    // `ControlsType` result so only genuine single-permanent presence conditions
+    // become state triggers; the effect ("sacrifice this creature") is parsed
+    // separately by the caller, exactly as for the `ControlsNone` arm.
+    for prefix in ["whenever ", "when "] {
+        if let Ok((rest, ())) = value((), tag::<_, _, OracleError<'_>>(prefix)).parse(lower) {
+            if let Ok((cond_rest, sc)) = parse_inner_condition(rest) {
+                if cond_rest.trim().is_empty() {
+                    if let Some(cond @ TriggerCondition::ControlsType { .. }) =
+                        static_condition_to_trigger_condition(&sc)
+                    {
+                        let mut def = make_base();
+                        def.mode = TriggerMode::StateCondition;
+                        def.condition = Some(cond);
+                        def.valid_card = Some(TargetFilter::SelfRef);
+                        return Some((TriggerMode::StateCondition, def));
+                    }
+                }
+            }
+        }
+    }
+
     // Discard triggers: prefix-based matching for broader card coverage.
     // Handles "you discard", "an opponent discards", "a player discards",
     // "each player discards" with optional type filters.
@@ -31111,6 +31141,162 @@ mod tests {
         } else {
             panic!("expected ControlsNone condition, got {:?}", def.condition);
         }
+    }
+
+    #[test]
+    fn state_trigger_control_a_creature_with_toughness() {
+        // CR 603.8: Endangered Armodon — the positive-existence sibling of the
+        // "control no [type]" state triggers above. Discriminating shape check:
+        // reverting the new parser arm yields no StateCondition/ControlsType
+        // trigger (the text falls through to Unimplemented), failing every
+        // assertion here.
+        let def = parse_trigger_line(
+            "When you control a creature with toughness 2 or less, sacrifice this creature.",
+            "Endangered Armodon",
+        );
+        assert_eq!(def.mode, TriggerMode::StateCondition);
+        if let Some(TriggerCondition::ControlsType { filter }) = &def.condition {
+            if let TargetFilter::Typed(tf) = filter {
+                assert!(
+                    tf.type_filters.contains(&TypeFilter::Creature),
+                    "expected Creature type filter in {:?}",
+                    tf.type_filters,
+                );
+                assert!(
+                    tf.properties.iter().any(|p| matches!(
+                        p,
+                        FilterProp::PtComparison {
+                            stat: PtStat::Toughness,
+                            comparator: Comparator::LE,
+                            ..
+                        }
+                    )),
+                    "expected `toughness N or less` PtComparison in {:?}",
+                    tf.properties,
+                );
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+            } else {
+                panic!("expected Typed filter, got {filter:?}");
+            }
+        } else {
+            panic!("expected ControlsType condition, got {:?}", def.condition);
+        }
+        // Effect should be sacrifice self.
+        let execute = def.execute.as_ref().expect("should have execute");
+        assert!(
+            matches!(*execute.effect, Effect::Sacrifice { .. }),
+            "expected Sacrifice, got {:?}",
+            execute.effect,
+        );
+    }
+
+    /// CR 603.8: Endangered Armodon's state trigger fires at runtime when its
+    /// controller controls a creature with toughness 2 or less, sacrificing
+    /// Endangered Armodon. Drives the real `check_state_triggers` →
+    /// `GameRunner` resolution path (not just the parsed AST): the
+    /// `ControlsType` condition is evaluated against the live battlefield and
+    /// the `Sacrifice` effect resolves. Discriminates against reverting the new
+    /// parser arm — without it the text produces no StateCondition trigger, so
+    /// the pre-assertion fails and Endangered Armodon is never sacrificed.
+    #[test]
+    fn endangered_armodon_state_trigger_fires_and_sacrifices_self() {
+        use crate::game::scenario::GameRunner;
+        use crate::game::triggers::check_state_triggers;
+        use crate::game::zones::create_object;
+        use crate::parser::oracle::parse_oracle_text;
+        use crate::types::card_type::CoreType;
+        use crate::types::identifiers::CardId;
+        use crate::types::phase::Phase;
+        use crate::types::zones::Zone;
+        use crate::types::PlayerId;
+        use std::sync::Arc;
+
+        const ORACLE: &str =
+            "When you control a creature with toughness 2 or less, sacrifice this creature.";
+
+        let parsed = parse_oracle_text(
+            ORACLE,
+            "Endangered Armodon",
+            &[],
+            &["Creature".to_string()],
+            &[],
+        );
+
+        // Confirm the state trigger was parsed — shape check before the runtime test.
+        assert!(
+            parsed
+                .triggers
+                .iter()
+                .any(|t| t.mode == TriggerMode::StateCondition),
+            "Endangered Armodon must parse a StateCondition trigger; got {:?}",
+            parsed.triggers,
+        );
+
+        let mut state = crate::types::game_state::GameState::new_two_player(7);
+        state.phase = Phase::PreCombatMain;
+        state.turn_number = 2;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+
+        // Endangered Armodon (3/3) — its own toughness (3) does NOT satisfy the
+        // "toughness 2 or less" filter, so the trigger fires only because of the
+        // separate small creature below, not self-reference.
+        let armodon_id = create_object(
+            &mut state,
+            CardId(7),
+            PlayerId(0),
+            "Endangered Armodon".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&armodon_id).unwrap();
+            obj.controller = PlayerId(0);
+            obj.power = Some(3);
+            obj.toughness = Some(3);
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types.core_types.push(CoreType::Creature);
+            obj.base_trigger_definitions = Arc::new(parsed.triggers.clone());
+            obj.trigger_definitions = parsed.triggers.clone().into();
+        }
+
+        // A 1/1 creature under the same controller satisfies "a creature with
+        // toughness 2 or less", making the state condition true.
+        let token_id = create_object(
+            &mut state,
+            CardId(8),
+            PlayerId(0),
+            "Goblin".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&token_id).unwrap();
+            obj.controller = PlayerId(0);
+            obj.power = Some(1);
+            obj.toughness = Some(1);
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types.core_types.push(CoreType::Creature);
+        }
+
+        // CR 603.8: the state trigger detects the small creature and enqueues the
+        // sacrifice.
+        check_state_triggers(&mut state);
+        assert!(
+            state.pending_trigger.is_some() || !state.stack.is_empty(),
+            "state trigger must be pending or on the stack after check_state_triggers",
+        );
+
+        // Resolve the sacrifice and confirm Endangered Armodon left the battlefield.
+        let mut runner = GameRunner::from_state(state);
+        runner.advance_until_stack_empty();
+        let state = runner.state();
+        assert!(
+            !state.battlefield.iter().any(|id| *id == armodon_id),
+            "Endangered Armodon must be sacrificed once a toughness-≤2 creature is controlled",
+        );
+        assert!(
+            state.battlefield.iter().any(|id| *id == token_id),
+            "the toughness-≤2 creature is unaffected by the sacrifice",
+        );
     }
 
     #[test]

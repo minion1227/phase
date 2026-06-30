@@ -2728,6 +2728,8 @@ pub(crate) fn parse_control_conditions(input: &str) -> OracleResult<'_, StaticCo
         parse_you_dont_control_a,
         // "you control no [type]" → Not(IsPresent)
         parse_you_control_no,
+        // "no opponent controls a/an [type]" → Not(IsPresent { Opponent })
+        parse_no_opponent_controls_a,
         // CR 702: "a creature you control has <keyword>" — subject-first
         // presence check (Odric, Lunarch Marshal). Grouped into the control
         // family so the parent dispatcher's `alt` arity stays within bounds.
@@ -3177,6 +3179,37 @@ fn parse_you_control_no(input: &str) -> OracleResult<'_, StaticCondition> {
         )));
     }
     let filter = inject_controller_you(filter);
+    let consumed = input.len() - remainder.len();
+    Ok((
+        &input[consumed..],
+        StaticCondition::Not {
+            condition: Box::new(StaticCondition::IsPresent {
+                filter: Some(filter),
+            }),
+        },
+    ))
+}
+
+/// CR 102.2 / CR 102.3 (an opponent of that player) + CR 109.4: Parse "no
+/// opponent controls a/an [type]" → `Not(IsPresent { filter, controller:
+/// Opponent })`. The condition holds while NO opponent controls a matching
+/// permanent. Kavu Runner / Skittish Kavu: "... as long as no opponent controls
+/// a white or blue creature". Mirrors `parse_you_dont_control_a` with the
+/// opponent controller axis.
+fn parse_no_opponent_controls_a(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = tag("no opponent controls ").parse(input)?;
+    // Require an article — reject the bare-plural count form ("no opponent
+    // controls creatures") exactly as the affirmative control arms do.
+    let (rest, _) = parse_article(rest)?;
+    let (filter, remainder) = parse_type_phrase(rest);
+    if matches!(filter, TargetFilter::Any) {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    // CR 109.4: battlefield-scoped presence controlled by an opponent.
+    let filter = inject_controller(filter, ControllerRef::Opponent);
     let consumed = input.len() - remainder.len();
     Ok((
         &input[consumed..],
@@ -7837,6 +7870,46 @@ mod tests {
         assert_eq!(rest, "");
         let tf = typed_presence(&c);
         assert_eq!(tf.controller, Some(ControllerRef::You));
+    }
+
+    /// CR 102.2: "no opponent controls a <type>" → `Not(IsPresent { Opponent })`.
+    #[test]
+    fn test_no_opponent_controls_a_creature() {
+        let (rest, c) = parse_inner_condition("no opponent controls a creature").unwrap();
+        assert_eq!(rest, "");
+        let tf = typed_presence_under_not(&c);
+        assert_eq!(tf.controller, Some(ControllerRef::Opponent));
+        assert!(tf.type_filters.contains(&TypeFilter::Creature));
+        assert!(tf.properties.iter().any(|p| matches!(
+            p,
+            FilterProp::InZone {
+                zone: Zone::Battlefield
+            }
+        )));
+    }
+
+    /// Kavu Runner / Skittish Kavu: "... as long as no opponent controls a white
+    /// or blue creature" must parse to a negated opponent presence (not the
+    /// `Unrecognized` fallthrough it used to).
+    #[test]
+    fn test_no_opponent_controls_a_white_or_blue_creature() {
+        let (rest, c) =
+            parse_inner_condition("no opponent controls a white or blue creature").unwrap();
+        assert_eq!(rest, "");
+        assert!(
+            matches!(c, StaticCondition::Not { .. }),
+            "expected Not(IsPresent), got {c:?}"
+        );
+    }
+
+    /// The required-article guard applies: bare-plural "no opponent controls
+    /// creatures" is a count form, not this presence gate.
+    #[test]
+    fn test_no_opponent_controls_bare_plural_rejected() {
+        assert!(
+            parse_no_opponent_controls_a("no opponent controls creatures").is_err(),
+            "bare-plural must be rejected"
+        );
     }
 
     /// The "Villain" creature subtype (Marvel set) must be recognized so that
