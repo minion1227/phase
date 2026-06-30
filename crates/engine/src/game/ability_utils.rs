@@ -2,8 +2,8 @@
 use crate::types::ability::TapStateChange;
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityKind, CardTypeSetSource, CastManaSpentMetric,
-    CombatRelationSubject, ControllerRef, CounterMoveSelection, Effect, EffectScope, FilterProp,
-    GameRestriction, ModalChoice, ModalSelectionCondition, ModalSelectionConstraint,
+    CombatRelationSubject, ControllerRef, CounterMoveSelection, DamageSource, Effect, EffectScope,
+    FilterProp, GameRestriction, ModalChoice, ModalSelectionCondition, ModalSelectionConstraint,
     MultiTargetSpec, ObjectScope, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef,
     ResolvedAbility, RestrictionPlayerScope, SpellContext, SubAbilityLink, TargetChoiceTiming,
     TargetFilter, TargetRef, TypeFilter, TypedFilter,
@@ -2013,6 +2013,7 @@ fn collect_target_slots(
         }
         if ability.target_choice_timing == TargetChoiceTiming::Stack
             && effect_needs_target_creature_quantity_slot(&ability.effect)
+            && !one_sided_fight_source_supplies_quantity_creature(&ability.effect)
         {
             let filter = effect_target_slot_filter(&ability.effect)
                 .expect("slot filter present when gate true");
@@ -2735,6 +2736,87 @@ fn sub_ability_inherits_parent_creature_target_only(
         && effect_player_filter_is_parent_target_anaphor(&sub.effect)
 }
 
+/// CR 115.1 + CR 115.10a + CR 608.2c: A one-sided-fight `DealDamage` ("Target
+/// creature you control deals damage equal to its power to target creature or
+/// planeswalker you don't control") reuses the parent-declared source creature
+/// (`targets[0]`) for BOTH the damage source (`damage_source: Target`) and the
+/// `Power { Target }` / `Toughness { Target }` magnitude. The amount's per-target
+/// creature-quantity slot would therefore surface a SECOND "target creature" —
+/// the bug in GH #4234, where Bite Down asked for one target too many (CR 601.2c:
+/// one slot per distinct instance of "target", and the magnitude here is NOT a
+/// distinct instance — "its power" anaphorically reuses the source).
+///
+/// Sibling of `sub_ability_inherits_parent_creature_target_only`, which handles
+/// the Swords to Plowshares GainLife rider whose ONLY slot is the redundant
+/// magnitude; here the genuine recipient slot remains, so we drop only the
+/// magnitude slot. The boost variant (Bite Down on Crime / Ambuscade) reads
+/// `Power { Anaphoric }`, which surfaces no quantity slot, so it is unaffected.
+///
+/// `damage_source: Some(Target)` is only emitted for a one-sided-fight clause
+/// whose damage-dealing object was named with "target" in an earlier clause (the
+/// subject, e.g. "Target creature you control deals…"), so that earlier slot
+/// always supplies `targets[0]`; the magnitude `Power { Target }` reads the SAME
+/// `targets[0]` and never needs a slot of its own. This is purely a function of
+/// the effect shape, so every slot-mapping site (producer, spec builder, both
+/// consumers, the minimum-count) can apply it identically and stay in lockstep
+/// (CR 700.2 slot-mapping invariant). It only ever fires when
+/// `effect_needs_target_creature_quantity_slot` is already true — i.e. the
+/// recipient filter (here `Or[Creature, Planeswalker] you don't control`) failed
+/// `effect_primary_target_supplies_creature_target`, the exact gap that left Bite
+/// Down asking for an extra target while Rabid Bite (plain creature recipient)
+/// was already correct — so it can only drop a redundant slot, never a real one.
+fn one_sided_fight_source_supplies_quantity_creature(effect: &Effect) -> bool {
+    let amount = match effect {
+        Effect::DealDamage {
+            damage_source: Some(DamageSource::Target),
+            amount,
+            ..
+        }
+        | Effect::DamageAll {
+            damage_source: Some(DamageSource::Target),
+            amount,
+            ..
+        } => amount,
+        _ => return false,
+    };
+    // CR 208.1: the magnitude reads the Target-scoped source object's P/T — the
+    // same object `damage_source: Target` reads. Recipient-scoped or fixed
+    // magnitudes keep their own slots.
+    quantity_expr_reads_target_object_pt(amount)
+}
+
+/// CR 208.1: whether a magnitude reads the Target-scoped object's power or
+/// toughness (`Power { Target }` / `Toughness { Target }`), recursing through the
+/// arithmetic wrappers `quantity_expr_target_slot_filter` already traverses.
+fn quantity_expr_reads_target_object_pt(expr: &QuantityExpr) -> bool {
+    match expr {
+        QuantityExpr::Ref { qty } => matches!(
+            qty,
+            QuantityRef::Power {
+                scope: ObjectScope::Target,
+            } | QuantityRef::Toughness {
+                scope: ObjectScope::Target,
+            }
+        ),
+        QuantityExpr::Offset { inner, .. }
+        | QuantityExpr::ClampMin { inner, .. }
+        | QuantityExpr::Multiply { inner, .. }
+        | QuantityExpr::DivideRounded { inner, .. }
+        | QuantityExpr::UpTo { max: inner }
+        | QuantityExpr::Power {
+            exponent: inner, ..
+        } => quantity_expr_reads_target_object_pt(inner),
+        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
+            exprs.iter().any(quantity_expr_reads_target_object_pt)
+        }
+        QuantityExpr::Difference { left, right } => {
+            quantity_expr_reads_target_object_pt(left)
+                || quantity_expr_reads_target_object_pt(right)
+        }
+        QuantityExpr::Fixed { .. } => false,
+    }
+}
+
 fn effect_player_filter_is_parent_target_anaphor(effect: &Effect) -> bool {
     match effect {
         Effect::GainLife { player, .. } => matches!(
@@ -3237,6 +3319,7 @@ fn collect_target_slot_specs(
         }
         if ability.target_choice_timing == TargetChoiceTiming::Stack
             && effect_needs_target_creature_quantity_slot(&ability.effect)
+            && !one_sided_fight_source_supplies_quantity_creature(&ability.effect)
         {
             let id = TargetInstanceId(*next_instance);
             *next_instance += 1;
@@ -4796,6 +4879,7 @@ fn assign_targets_recursive(
     }
     if ability.target_choice_timing == TargetChoiceTiming::Stack
         && effect_needs_target_creature_quantity_slot(&ability.effect)
+        && !one_sided_fight_source_supplies_quantity_creature(&ability.effect)
     {
         if let Some(target) = targets.get(*next_target) {
             ability.targets.push(target.clone());
@@ -5078,6 +5162,7 @@ fn assign_selected_slots_recursive(
     }
     if ability.target_choice_timing == TargetChoiceTiming::Stack
         && effect_needs_target_creature_quantity_slot(&ability.effect)
+        && !one_sided_fight_source_supplies_quantity_creature(&ability.effect)
     {
         let Some(selected_slot) = selected_slots.get(*next_slot) else {
             return Err(EngineError::InvalidAction(
@@ -5477,6 +5562,7 @@ fn minimum_targets_in_chain(state: &GameState, ability: &ResolvedAbility) -> usi
     let target_creature_quantity_companion = if ability.target_choice_timing
         == TargetChoiceTiming::Stack
         && effect_needs_target_creature_quantity_slot(&ability.effect)
+        && !one_sided_fight_source_supplies_quantity_creature(&ability.effect)
         && !ability.optional_targeting
     {
         1
