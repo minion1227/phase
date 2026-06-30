@@ -19175,6 +19175,89 @@ fn collapse_ephemeral_color_choice_mana(def: &mut AbilityDefinition) {
     }
 }
 
+/// CR 105.4 + CR 702.11d + CR 702.16: A grant of "protection/hexproof from the
+/// color of your choice" needs a color choice at resolution so the granting
+/// source carries a `ChosenAttribute::Color` for the layer applier to bake into
+/// the granted keyword (see the `chosen_color` pre-read in `game/layers.rs`,
+/// which resolves `Protection(ChosenColor)` / `HexproofFrom(ChosenColor)` from
+/// the source's chosen color). Cards in this class (Mother of Runes, Blessed
+/// Breath, Aven Liberator) print the grant as a single clause with no separate
+/// "choose a color" sentence, so the parser must inject the choice.
+///
+/// This mirrors `try_parse_become_choice`, which already emits
+/// `Choose(Color) -> sub_ability(AddChosenColor)` for "becomes the color of your
+/// choice": the `Choose` resolves first (storing the color on the source via
+/// `effects/choose.rs`), then the grant sub-ability bakes it in.
+///
+/// Wraps a `GenericEffect` whose static modifications grant the chosen-color
+/// keyword into `Choose(Color) -> sub_ability(grant)`. Skips clauses already
+/// nested under a color choice (`parent_is_color_choice`) — e.g. an explicit
+/// "Choose a color. Target creature gains protection from that color" already
+/// supplies the choice, so re-wrapping would double-prompt.
+fn inject_chosen_color_choice_grant(def: &mut AbilityDefinition, parent_is_color_choice: bool) {
+    if !parent_is_color_choice && effect_grants_chosen_color_keyword(&def.effect) {
+        // Move the grant under a freshly injected color choice. Any existing
+        // sub_ability chain rides along beneath the grant so downstream effects
+        // still resolve after it.
+        let grant_effect = std::mem::replace(
+            &mut def.effect,
+            Box::new(Effect::Choose {
+                choice_type: ChoiceType::color(),
+                persist: false,
+                selection: crate::types::ability::TargetSelectionMode::Chosen,
+            }),
+        );
+        let prior_sub = def.sub_ability.take();
+        let mut grant_ability = AbilityDefinition::new(AbilityKind::Spell, *grant_effect);
+        grant_ability.sub_ability = prior_sub;
+        def.sub_ability = Some(Box::new(grant_ability));
+        // The grant is now a leaf beneath the choice; recurse into it with the
+        // parent flag set so it is not re-wrapped, while any prior downstream
+        // chain it carries is still visited.
+        if let Some(sub) = def.sub_ability.as_mut() {
+            inject_chosen_color_choice_grant(sub, true);
+        }
+        return;
+    }
+
+    let child_under_color_choice = matches!(
+        &*def.effect,
+        Effect::Choose {
+            choice_type: ChoiceType::Color { .. },
+            ..
+        }
+    );
+    if let Some(sub) = def.sub_ability.as_mut() {
+        inject_chosen_color_choice_grant(sub, child_under_color_choice);
+    }
+}
+
+/// True when `effect` is a `GenericEffect` granting `Protection`/`Hexproof` from
+/// the chosen color via a continuous `AddKeyword` modification (CR 702.16 /
+/// CR 702.11d).
+fn effect_grants_chosen_color_keyword(effect: &Effect) -> bool {
+    use crate::types::keywords::{HexproofFilter, Keyword, ProtectionTarget};
+    let Effect::GenericEffect {
+        static_abilities, ..
+    } = effect
+    else {
+        return false;
+    };
+    static_abilities.iter().any(|s| {
+        s.modifications.iter().any(|m| {
+            matches!(
+                m,
+                ContinuousModification::AddKeyword { keyword }
+                    if matches!(
+                        keyword,
+                        Keyword::Protection(ProtectionTarget::ChosenColor)
+                            | Keyword::HexproofFrom(HexproofFilter::ChosenColor)
+                    )
+            )
+        })
+    })
+}
+
 fn parse_that_type_mana_count(text: &str) -> Option<QuantityExpr> {
     let lower = text.to_lowercase();
     nom_on_lower(text, &lower, |input| {
@@ -34373,6 +34456,50 @@ mod tests {
                 ..
             } if tf.type_filters.contains(&TypeFilter::Creature)
         ));
+    }
+
+    /// Issue #4371 + CR 105.4 + CR 702.16: "gains protection from the color of
+    /// your choice" must inject a color `Choose` ahead of the grant so the
+    /// granting source carries a `ChosenAttribute::Color` for the layer applier
+    /// to bake into `Protection(ChosenColor)`. Without the injected choice the
+    /// grant reads a `None` chosen color and protects from nothing (the reported
+    /// "doesn't resolve" bug). Mirrors the `try_parse_become_choice` structure.
+    #[test]
+    fn protection_from_color_of_your_choice_injects_color_choice() {
+        use crate::types::keywords::{Keyword, ProtectionTarget};
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "{T}: Target creature you control gains protection from the color of your choice until end of turn.",
+            "Mother of Runes",
+            &[],
+            &["Creature".to_string()],
+            &[],
+        );
+        let def = &parsed.abilities[0];
+        // Outer effect is the injected color choice.
+        assert!(
+            matches!(
+                &*def.effect,
+                Effect::Choose {
+                    choice_type: ChoiceType::Color { excluded },
+                    ..
+                } if excluded.is_empty()
+            ),
+            "expected injected Choose(Color), got {:?}",
+            def.effect
+        );
+        // The grant rides as the sub-ability and targets the chosen color.
+        let sub = def.sub_ability.as_ref().expect("grant sub_ability");
+        let Effect::GenericEffect {
+            static_abilities, ..
+        } = &*sub.effect
+        else {
+            panic!("expected grant GenericEffect, got {:?}", sub.effect);
+        };
+        assert!(static_abilities.iter().any(|s| s.modifications.contains(
+            &ContinuousModification::AddKeyword {
+                keyword: Keyword::Protection(ProtectionTarget::ChosenColor),
+            }
+        )));
     }
 
     /// CR 611.2a + CR 514.2: "gains <keyword> until end of turn and <non-pump
