@@ -351,6 +351,16 @@ pub(crate) fn matches_player_scope(
                         });
                         triggering.is_none_or(|pid| pid != p.id)
                     }
+                    // CR 102.2 + CR 603.2: Each opponent of the *triggering*
+                    // (casting) player. The base anchor is the caster, not the
+                    // controller, so this legitimately includes the source's
+                    // controller as a recipient. Fail closed when no trigger
+                    // event is in scope (caster anchor undefined).
+                    PlayerFilter::OpponentOfTriggeringPlayer => state
+                        .current_trigger_event
+                        .as_ref()
+                        .and_then(|e| crate::game::targeting::extract_player_from_event(e, state))
+                        .is_some_and(|caster| p.id != caster),
                     // CR 109.4: the parent-object-target anchor requires the
                     // resolving `ResolvedAbility` (for `ability.targets`),
                     // which this generic scope predicate does not carry. The
@@ -7759,6 +7769,7 @@ fn scoped_player_matches_filter(
         | PlayerFilter::TriggeringPlayer
         | PlayerFilter::OpponentOtherThanTriggering
         | PlayerFilter::OpponentOfTriggeringPlayerNotAttacked
+        | PlayerFilter::OpponentOfTriggeringPlayer
         | PlayerFilter::VotedFor { .. }
         | PlayerFilter::ParentObjectTargetController
         | PlayerFilter::ChosenPlayer { .. }
@@ -20143,5 +20154,65 @@ mod tests {
             creature_obj.casting_permissions.is_empty(),
             "illegal looked creature must not receive a cast permission"
         );
+    }
+
+    /// CR 102.2 + CR 603.2 (issue #4361): `PlayerFilter::OpponentOfTriggeringPlayer`
+    /// matches every player who is an opponent of the CASTER (the triggering
+    /// player), independent of the effect controller. With a SpellCast event by
+    /// B: A matches, B does not. With no trigger event: neither matches
+    /// (caster anchor undefined → fail closed).
+    #[test]
+    fn opponent_of_triggering_player_matches_casters_opponents() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Heartwood Storyteller".to_string(),
+            Zone::Battlefield,
+        );
+
+        // B (PlayerId(1)) is the caster; the effect controller is A (PlayerId(0)).
+        state.current_trigger_event = Some(GameEvent::SpellCast {
+            card_id: CardId(9000),
+            controller: PlayerId(1),
+            object_id: ObjectId(9000),
+        });
+
+        assert!(
+            matches_player_scope(
+                &state,
+                PlayerId(0),
+                &PlayerFilter::OpponentOfTriggeringPlayer,
+                PlayerId(0),
+                source,
+            ),
+            "A is an opponent of the caster B and must match (even as the controller)"
+        );
+        assert!(
+            !matches_player_scope(
+                &state,
+                PlayerId(1),
+                &PlayerFilter::OpponentOfTriggeringPlayer,
+                PlayerId(0),
+                source,
+            ),
+            "B (the caster) is not its own opponent"
+        );
+
+        // No trigger event in scope → fail closed (neither matches).
+        state.current_trigger_event = None;
+        for pid in [PlayerId(0), PlayerId(1)] {
+            assert!(
+                !matches_player_scope(
+                    &state,
+                    pid,
+                    &PlayerFilter::OpponentOfTriggeringPlayer,
+                    PlayerId(0),
+                    source,
+                ),
+                "without a trigger event the caster anchor is undefined; {pid:?} must not match"
+            );
+        }
     }
 }

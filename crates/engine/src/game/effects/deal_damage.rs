@@ -1452,6 +1452,16 @@ fn collect_matching_players(
                         });
                         triggering != Some(p.id)
                     }
+                    // CR 102.2 + CR 603.2: Each opponent of the triggering
+                    // (casting) player, resolved live from the trigger event;
+                    // fail closed when no event is in scope. Mirrors the
+                    // recipient predicate in `matches_player_scope` so the
+                    // variant has one consistent meaning across all consumers.
+                    PlayerFilter::OpponentOfTriggeringPlayer => state
+                        .current_trigger_event
+                        .as_ref()
+                        .and_then(|e| crate::game::targeting::extract_player_from_event(e, state))
+                        .is_some_and(|caster| p.id != caster),
                     // CR 608.2c + CR 701.38: Match each player who cast a vote
                     // for the recorded choice index. Mirrors the
                     // `ZoneChangedThisWay` arm — consults the transient
@@ -1656,6 +1666,16 @@ pub fn resolve_each_player(
                         });
                         triggering != Some(p.id)
                     }
+                    // CR 102.2 + CR 603.2: Each opponent of the triggering
+                    // (casting) player, resolved live from the trigger event;
+                    // fail closed when no event is in scope. Mirrors the
+                    // recipient predicate in `matches_player_scope` so the
+                    // variant has one consistent meaning across all consumers.
+                    PlayerFilter::OpponentOfTriggeringPlayer => state
+                        .current_trigger_event
+                        .as_ref()
+                        .and_then(|e| crate::game::targeting::extract_player_from_event(e, state))
+                        .is_some_and(|caster| p.id != caster),
                     // CR 608.2c + CR 701.38: Match each player who cast a vote
                     // for the recorded choice index in the most recent vote.
                     PlayerFilter::VotedFor { choice_index } => state

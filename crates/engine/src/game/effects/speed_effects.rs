@@ -160,6 +160,20 @@ fn players_for_filter(
                 .map(|player| player.id)
                 .collect()
         }
+        // CR 102.2 + CR 603.2: Each opponent of the triggering (casting) player.
+        // Fail closed (empty) when no trigger event anchors the caster.
+        PlayerFilter::OpponentOfTriggeringPlayer => {
+            let caster = state
+                .current_trigger_event
+                .as_ref()
+                .and_then(|e| crate::game::targeting::extract_player_from_event(e, state));
+            state
+                .players
+                .iter()
+                .filter(|player| !player.is_eliminated && caster.is_some_and(|c| player.id != c))
+                .map(|player| player.id)
+                .collect()
+        }
         // CR 608.2c + CR 701.38: Players who cast a vote for the recorded
         // choice index in the most recent vote within the current top-level
         // resolution. Read directly off the transient ballot ledger.
