@@ -1879,12 +1879,25 @@ fn starts_remove_counter_clause_lower(s: &str) -> OracleResult<'_, ()> {
 /// verb in a later conjunct cannot trigger a false split. Combat sibling of
 /// `starts_target_continuous_clause_lower`.
 fn starts_up_to_target_combat_clause_lower(s: &str) -> OracleResult<'_, ()> {
-    let (rest, _) = (
-        opt(tag::<_, _, OracleError<'_>>("up to ")),
-        nom_primitives::parse_number,
-        tag(" target "),
-    )
-        .parse(s)?;
+    // Subject accepts both the counted "[up to] <n> target <filter>" form and the
+    // bare "target <filter>" form — CR 601.2c: every "target" opens its own
+    // target, numbered or not. An unnumbered second conjunct ("… and target
+    // creature can't block this combat") therefore splits identically to the
+    // counted Boros shape; the combat-requirement predicate below stays the
+    // discriminator, so a bare-`target` noun-phrase continuation with no combat
+    // verb is still left un-split.
+    let (rest, _) = alt((
+        value(
+            (),
+            (
+                opt(tag::<_, _, OracleError<'_>>("up to ")),
+                nom_primitives::parse_number,
+                tag(" target "),
+            ),
+        ),
+        value((), tag::<_, _, OracleError<'_>>("target ")),
+    ))
+    .parse(s)?;
     // Bound the combat-predicate search to THIS conjunct segment only.
     let segment = match take_until::<_, _, OracleError<'_>>(" and ").parse(rest) {
         Ok((_, seg)) => seg,
