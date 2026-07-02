@@ -466,6 +466,26 @@ fn split_trailing_as_long_as(lower: &str) -> Option<&str> {
     .and_then(|(_, condition)| condition)
 }
 
+/// CR 611.3a: A static restriction may carry a trailing gate introduced by
+/// either `" as long as <condition>"` (continuous) or `" if <condition>"` (state
+/// gate) — e.g. Rock Jockey: "You can't play lands if this creature was cast
+/// this turn." Returns the condition text for `parse_static_condition`. The
+/// `as long as` form is tried first so a card carrying both keywords anchors on
+/// the continuous form; a bare `if` gate is the fallback. As with
+/// `split_trailing_as_long_as`, an unrecognized condition downstream leaves the
+/// line unsupported rather than enforcing the restriction unconditionally.
+fn split_trailing_gate_condition(lower: &str) -> Option<&str> {
+    split_trailing_as_long_as(lower).or_else(|| {
+        opt(preceded(
+            (take_until::<_, _, OracleError<'_>>(" if "), tag(" if ")),
+            rest,
+        ))
+        .parse(lower)
+        .ok()
+        .and_then(|(_, condition)| condition)
+    })
+}
+
 pub(crate) fn parse_static_line_inner(
     text: &str,
     inverted: InvertedAsLongAs,
@@ -2743,12 +2763,13 @@ pub(crate) fn parse_static_line_inner(
         let def = StaticDefinition::new(StaticMode::Other("CantPlayLand".to_string()))
             .affected(affected)
             .description(text.to_string());
-        // CR 611.3a: a trailing "as long as <condition>" gates the restriction
-        // (Limited Resources: "... as long as ten or more lands are on the
-        // battlefield"). If the rider is present but its condition is NOT
-        // recognized, leave the whole line unsupported (return None) rather than
-        // marking it a CantPlayLand enforced unconditionally.
-        return match split_trailing_as_long_as(tp.lower) {
+        // CR 611.3a: a trailing "as long as <condition>" (Limited Resources:
+        // "... as long as ten or more lands are on the battlefield") or "if
+        // <condition>" (Rock Jockey: "... if this creature was cast this turn")
+        // gates the restriction. If the rider is present but its condition is
+        // NOT recognized, leave the whole line unsupported (return None) rather
+        // than marking it a CantPlayLand enforced unconditionally.
+        return match split_trailing_gate_condition(tp.lower) {
             Some(condition_text) => Some(def.condition(parse_static_condition(condition_text)?)),
             None => Some(def),
         };
