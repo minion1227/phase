@@ -9,7 +9,7 @@
 //!   Trinisphere tax shapes and are NOT this axis.
 //! - `StaticDefinition.affected: Option<TargetFilter>` at
 //!   `crates/engine/src/types/ability.rs:20740` — carries the caster scope
-//!   (`TypedFilter.controller`), exactly as `collect_cost_modifiers` reads it.
+//!   (`TypedFilter.controller`), exactly as `collect_battlefield_cost_modifiers` reads it.
 //! - `CardFace.static_abilities: Vec<StaticDefinition>` at `card.rs:162`;
 //!   the runtime counterpart is `GameObject.static_definitions`.
 //! - `ManaCost::Cost { generic, shards }` at
@@ -166,7 +166,7 @@ pub(crate) fn your_spell_discount_parts<'a>(
 /// CR 601.2f: the generic discount this one static gives to spells you cast, or
 /// `None` when it is not a board-wide reduction of your own spells.
 ///
-/// Mirrors the eligibility tests `casting::collect_cost_modifiers` applies at
+/// Mirrors the eligibility tests `casting::collect_battlefield_cost_modifiers` applies at
 /// cast time, so deck classification and the resolver agree by construction:
 /// `Reduce` mode only, never a `SelfRef` self-cost reduction, and never an
 /// opponent-scoped modifier.
@@ -201,6 +201,14 @@ fn your_spell_discount(def: &StaticDefinition) -> Option<u32> {
     // generic reduction, so the discount magnitude is `generic`. A reduction of
     // zero generic mana (a purely colored `amount`) moves no cost here and is
     // not counted as an engine.
+    //
+    // `dynamic_count` is deliberately NOT resolved here. A scaling reducer
+    // ("costs {1} less for each artifact you control") multiplies `generic` by a
+    // game-state quantity that is unknowable at deck-analysis time, so this
+    // reports the per-unit amount — one application's worth. That understates a
+    // scaling reducer's ceiling rather than inventing a multiplier, and on the
+    // live path `CostReductionPolicy` additionally caps the credited discount,
+    // so a large `amount` whose multiplier is currently zero cannot dominate.
     let ManaCost::Cost { generic, .. } = amount else {
         return None;
     };
@@ -228,7 +236,7 @@ fn your_spell_discount_filter(def: &StaticDefinition) -> Option<Option<TargetFil
 /// CR 205 authority (`matches_type_filter_against_face`). The caster axis is
 /// deliberately not re-checked here: `StaticDefinition.affected` already carried
 /// it in [`your_spell_discount`], which is exactly how
-/// `casting::collect_cost_modifiers` splits the two.
+/// `casting::collect_battlefield_cost_modifiers` splits the two.
 ///
 /// Anything this cannot verify — a `properties` predicate that needs live game
 /// state, or a filter variant outside the composition below — reports `false`,

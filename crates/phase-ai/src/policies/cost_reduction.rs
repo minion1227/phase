@@ -6,7 +6,7 @@
 //! CR 601.2f: Goblin Electromancer, Baral, Foundry Inspector and the Medallion
 //! cycle are acceleration that never taps for mana — every later spell costs
 //! less for as long as the permanent survives. The engine already applies the
-//! discount at cast time (`casting::collect_cost_modifiers`), so the AI is never
+//! discount at cast time (`casting::collect_battlefield_cost_modifiers`), so the AI is never
 //! overcharged; what it lacks is any reason to *sequence the reducer first*.
 //! `RampTimingPolicy` supplies exactly that signal for permanents that add mana
 //! (`Effect::Mana`, land fetch, extra land drops) and structurally cannot see a
@@ -118,6 +118,15 @@ impl TacticalPolicy for CostReductionPolicy {
 ///
 /// Lands are excluded because CR 305.1 land plays are not spells and are never
 /// discounted by a CR 601.2f cost reducer.
+///
+/// This counts remaining casts, NOT the subset the reducer's `spell_filter`
+/// admits — narrowing per candidate would mean evaluating that filter against
+/// every card in hand inside the search inner loop. The narrowing is applied
+/// once per game instead: `CostReductionFeature::commitment` folds in the
+/// deck-wide fraction of cards the reducers actually discount, and the registry
+/// multiplies this verdict by that commitment via `activation`. So a deck whose
+/// reducers cover little of its own list is already scaled down here, and a
+/// reducer that covers nothing deactivates the policy outright.
 fn castable_cards_in_hand(ctx: &PolicyContext<'_>, exclude: Option<ObjectId>) -> u32 {
     let Some(player) = ctx.state.players.get(ctx.ai_player.0 as usize) else {
         return 0;
