@@ -145,6 +145,7 @@ pub enum PolicyId {
     /// CR 608.2c: "return a land you control" self-bounce target choice.
     SelfBounceTarget,
     /// CR 121.1: reward drawing into an on-battlefield "whenever you draw" engine.
+    CostReduction,
     DrawPayoff,
 }
 
@@ -401,6 +402,7 @@ impl Default for PolicyRegistry {
             Box::new(PayoffPolicy::new(&BLINK_PAYOFF)),
             Box::new(LoopShortcutPolicy),
             Box::new(super::self_bounce_target::SelfBounceTargetPolicy),
+            Box::new(super::cost_reduction::CostReductionPolicy),
             Box::new(super::draw_payoff::DrawPayoffPolicy),
         ];
         let mut by_kind: HashMap<DecisionKind, Vec<usize>> = HashMap::new();

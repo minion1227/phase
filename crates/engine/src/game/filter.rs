@@ -1297,7 +1297,12 @@ pub(crate) fn matches_target_filter_against_face(face: &CardFace, filter: &Targe
 /// CR 205: Evaluate a single `TypeFilter` against a bare `CardFace`'s printed
 /// card type line (core types, subtypes, supertypes). Context-free counterpart
 /// to the object-based type checks in `filter_inner_for_object`.
-pub(crate) fn matches_type_filter_against_face(face: &CardFace, filter: &TypeFilter) -> bool {
+///
+/// `pub` because deck-time analysis outside this crate (`phase-ai`'s
+/// `features::cost_reduction`) classifies bare `CardFace`s against a static's
+/// `spell_filter` before any `GameObject` exists, and must use this authority
+/// for the type axis rather than re-deriving CR 205 type semantics.
+pub fn matches_type_filter_against_face(face: &CardFace, filter: &TypeFilter) -> bool {
     match filter {
         TypeFilter::Creature => face.card_type.core_types.contains(&CoreType::Creature),
         TypeFilter::Land => face.card_type.core_types.contains(&CoreType::Land),
