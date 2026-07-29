@@ -1376,8 +1376,16 @@ pub fn context_free_prop_matches_face(face: &CardFace, prop: &FilterProp) -> Opt
             i32::try_from(face_colors(face).len()).unwrap_or(i32::MAX),
             i32::from(*count),
         )),
-        // CR 702: printed keyword line.
+        // CR 702: printed keyword line. The keyword authorities in
+        // `game/keywords.rs` all take a `GameObject`; this function's entire
+        // contract is that NO object exists (a bare `CardFace` outside the
+        // game), so there is no zone, no grant and no `off_zone_characteristics`
+        // to consult — the printed line IS the complete truth here. A caller
+        // holding an `ObjectId` must use the object-based `matches_target_filter`
+        // family instead, as the module doc says.
+        // allow-raw-authority: bare CardFace has no object, so no keyword grant can exist to miss
         FilterProp::WithKeyword { value } => Some(face.keywords.contains(value)),
+        // allow-raw-authority: bare CardFace has no object, so no keyword grant can exist to miss
         FilterProp::WithoutKeyword { value } => Some(!face.keywords.contains(value)),
         // CR 111.1 + CR 108.2: a bare face is a card definition, never a token.
         FilterProp::Token => Some(false),
