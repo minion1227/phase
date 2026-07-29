@@ -27,9 +27,9 @@
 //! per-creature power to the engine's `object_crew_power_contribution` authority.
 //! No affordability sweep, no `find_legal_targets`.
 
-use engine::game::static_abilities::{object_crew_power_contribution, object_has_cant_crew};
+use engine::game::engine::creature_can_pay_crew;
+use engine::game::static_abilities::object_crew_power_contribution;
 use engine::types::actions::GameAction;
-use engine::types::card_type::CoreType;
 use engine::types::game_state::GameState;
 use engine::types::player::PlayerId;
 use engine::types::statics::CrewAction;
@@ -87,34 +87,22 @@ impl TacticalPolicy for VehicleDeploymentPolicy {
             return PolicyVerdict::neutral(PolicyReason::new("vehicle_deployment_na"));
         };
 
-        // Only now pay for the board walk. CR 702.122a: crew taps OTHER untapped
-        // creatures the controller owns, so an already-tapped body, a creature
-        // under a `CantCrew` static (CR 702.122d), and the Vehicle itself all
-        // contribute nothing. Per-creature power goes through the engine's
-        // authority so a Vehicle crewed "as though its power were N greater", or
-        // by toughness instead of power, is counted the way the crew payment
-        // itself would count it.
+        // Only now pay for the board walk. Eligibility is NOT re-derived here:
+        // `creature_can_pay_crew` is the engine's own composed authority, the
+        // same rule the crew payment path enforces (controlled, untapped, a
+        // creature, not `CantTap`, not `CantCrew`). Assembling that filter from
+        // parts is how this policy previously over-counted — it omitted the
+        // `object_cant_tap` term, so a `CantTap` 3/3 read as able to pay Crew 3.
+        //
+        // Per-creature power likewise goes through `object_crew_power_contribution`,
+        // so a body crewing "as though its power were N greater" or by toughness
+        // instead of power is counted exactly as the real payment would count it.
         let available: i32 = ctx
             .state
             .battlefield
             .iter()
-            .filter_map(|id| {
-                let obj = ctx.state.objects.get(id)?;
-                if obj.controller != ctx.ai_player
-                    || obj.tapped
-                    || !obj.card_types.core_types.contains(&CoreType::Creature)
-                {
-                    return None;
-                }
-                if object_has_cant_crew(ctx.state, *id) {
-                    return None;
-                }
-                Some(object_crew_power_contribution(
-                    ctx.state,
-                    *id,
-                    CrewAction::Crew,
-                ))
-            })
+            .filter(|id| creature_can_pay_crew(ctx.state, **id, ctx.ai_player))
+            .map(|id| object_crew_power_contribution(ctx.state, *id, CrewAction::Crew))
             .sum();
 
         let required = i32::try_from(crew_cost).unwrap_or(i32::MAX);

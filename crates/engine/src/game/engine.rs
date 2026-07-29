@@ -9956,6 +9956,24 @@ fn handle_equip_activation(
 /// CR 702.122a: Activate a Vehicle's crew ability from Priority.
 /// Unlike Equip (CR 702.6a) and Saddle (CR 702.171a), Crew has NO "Activate only as a
 /// sorcery" restriction — it can be activated any time the controller has priority.
+/// CR 702.122a + CR 702.122d: can this creature legally be tapped to pay a crew
+/// cost right now?
+///
+/// Composes the two halves the crew payment path enforces — the tappability rule
+/// in [`is_tappable_creature_for_cost`] (controlled, untapped, a creature, and
+/// not under a `CantTap` restriction) and the `CantCrew` static — into one
+/// named authority.
+///
+/// `pub` so consumers outside this module (`phase-ai`'s
+/// `VehicleDeploymentPolicy`) ask THIS question instead of assembling their own
+/// filter from the parts. A partial duplicate silently over-counts: omitting the
+/// `object_cant_tap` term alone makes a `CantTap` 3/3 look like it can pay
+/// Crew 3, which it cannot.
+pub fn creature_can_pay_crew(state: &GameState, id: ObjectId, player: PlayerId) -> bool {
+    is_tappable_creature_for_cost(state, id, player)
+        && !super::static_abilities::object_has_cant_crew(state, id)
+}
+
 fn is_tappable_creature_for_cost(state: &GameState, id: ObjectId, player: PlayerId) -> bool {
     state.objects.get(&id).is_some_and(|o| {
         o.controller == player

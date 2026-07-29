@@ -6,6 +6,7 @@ use std::sync::Arc;
 use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
 use engine::game::zones::create_object;
 use engine::types::ability::StaticDefinition;
+use engine::types::ability::TargetFilter;
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::format::FormatConfig;
@@ -456,4 +457,80 @@ fn toughness_instead_of_power_contribution_is_honored() {
     let (obj, card) = vehicle_in_hand(&mut st, 4);
     let (_, reason) = verdict_for(&st, obj, card, 0.8);
     assert_eq!(reason.kind, "vehicle_deployment_crewable");
+}
+
+// ─── review #6790 blocker: CantTap creatures cannot pay Crew ─────────────────
+
+/// A creature the engine's crew path rejects: `StaticMode::CantTap`.
+///
+/// Mirrors the engine's own fixture (`restrictions.rs::creature_with_cant_tap`) —
+/// the static goes on BOTH `static_definitions` and `base_static_definitions`,
+/// then `evaluate_layers` runs, because `object_cant_tap` has an O(1) fast path
+/// gated on a static-kind presence index. Skipping the layer pass would leave
+/// that index empty, the fast path would return `false`, and this test would pass
+/// for the wrong reason.
+fn cant_tap_creature(state: &mut GameState, power: i32) -> ObjectId {
+    let id = creature(state, power, AI);
+    {
+        let obj = state.objects.get_mut(&id).unwrap();
+        let def = StaticDefinition::new(StaticMode::CantTap).affected(TargetFilter::SelfRef);
+        obj.static_definitions.push(def.clone());
+        Arc::make_mut(&mut obj.base_static_definitions).push(def);
+    }
+    engine::game::layers::evaluate_layers(state);
+    id
+}
+
+#[test]
+fn cant_tap_creature_cannot_pay_crew() {
+    // CR 702.122a via the engine's `creature_can_pay_crew` authority: a CantTap
+    // 3/3 is untapped and controlled, but cannot legally be tapped, so it
+    // contributes nothing toward Crew 3. The previous hand-rolled filter omitted
+    // `object_cant_tap` and counted it, awarding the crewable bonus for a Vehicle
+    // that can never be crewed.
+    let mut st = state();
+    let restricted = cant_tap_creature(&mut st, 3);
+    // Guard the fixture itself through the public authority: if the static did
+    // not take effect, this test would pass vacuously. Paired with a plain body
+    // of the same power so the assertion discriminates the restriction rather
+    // than merely observing a `false`.
+    let unrestricted = creature(&mut st, 3, AI);
+    assert!(
+        !engine::game::engine::creature_can_pay_crew(&st, restricted, AI),
+        "fixture must actually be under a CantTap restriction"
+    );
+    assert!(
+        engine::game::engine::creature_can_pay_crew(&st, unrestricted, AI),
+        "an identical unrestricted body must be able to pay crew"
+    );
+    // Remove the control body again so the crew total is the restricted one only.
+    st.battlefield.retain(|id| *id != unrestricted);
+    let (obj, card) = vehicle_in_hand(&mut st, 3);
+    let (delta, reason) = verdict_for(&st, obj, card, 0.8);
+    assert_eq!(reason.kind, "vehicle_deployment_uncrewable");
+    assert_eq!(delta, 0.0);
+}
+
+#[test]
+fn cant_tap_creature_alongside_a_legal_body_still_undercounts() {
+    // Discriminating: one legal 1-power body plus a CantTap 3/3 totals 1, not 4,
+    // so Crew 3 stays out of reach.
+    let mut st = state();
+    cant_tap_creature(&mut st, 3);
+    creature(&mut st, 1, AI);
+    let (obj, card) = vehicle_in_hand(&mut st, 3);
+    let (_, reason) = verdict_for(&st, obj, card, 0.8);
+    assert_eq!(reason.kind, "vehicle_deployment_uncrewable");
+}
+
+#[test]
+fn an_unrestricted_body_of_the_same_power_does_crew() {
+    // The positive control for the two tests above: identical power, no CantTap,
+    // so the difference is provably the restriction and not the power total.
+    let mut st = state();
+    creature(&mut st, 3, AI);
+    let (obj, card) = vehicle_in_hand(&mut st, 3);
+    let (delta, reason) = verdict_for(&st, obj, card, 0.8);
+    assert_eq!(reason.kind, "vehicle_deployment_crewable");
+    assert!(delta > 0.0);
 }
