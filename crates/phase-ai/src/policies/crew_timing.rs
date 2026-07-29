@@ -14,6 +14,12 @@ use super::context::PolicyContext;
 use super::registry::{DecisionKind, PolicyId, PolicyReason, PolicyVerdict, TacticalPolicy};
 use crate::features::DeckFeatures;
 
+/// Floor under the vehicles-commitment scale. A crew activation the AI is
+/// already looking at is worth judging even in a deck the axis rates low, so the
+/// weight is damped rather than zeroed — unlike the payoff policies, which opt
+/// out entirely below their floor.
+const MIN_CREW_ACTIVATION: f32 = 0.25;
+
 pub struct CrewTimingPolicy;
 
 impl TacticalPolicy for CrewTimingPolicy {
@@ -27,11 +33,19 @@ impl TacticalPolicy for CrewTimingPolicy {
 
     fn activation(
         &self,
-        _features: &DeckFeatures,
+        features: &DeckFeatures,
         _state: &GameState,
         _player: PlayerId,
     ) -> Option<f32> {
-        Some(1.0) // activation-constant: exact initial-Crew action self-gates in verdict.
+        // CR 702.122: previously `activation-constant Some(1.0)` — the exact
+        // initial-Crew action self-gates in `verdict`, so a constant was safe,
+        // but it applied identical weight in a dedicated Vehicles shell and in a
+        // deck running one incidental Copter. `features::vehicles` now supplies
+        // that deck signal. The floor is deliberately NOT applied: crewing is
+        // still a real decision in a low-commitment deck, so the policy keeps
+        // firing at a reduced weight rather than switching off, and only a deck
+        // with no Vehicles at all (commitment 0.0) goes silent.
+        Some(features.vehicles.commitment.max(MIN_CREW_ACTIVATION))
     }
 
     fn verdict(&self, ctx: &PolicyContext<'_>) -> PolicyVerdict {
