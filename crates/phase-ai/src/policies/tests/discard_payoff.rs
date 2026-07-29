@@ -500,10 +500,14 @@ fn composite_cost_containing_a_discard_is_credited() {
     let context = context(&config, session(0.8));
     let candidate = activate(outlet, 0);
     let decision = priority_decision(&candidate);
-    let (_, reason) =
+    let (delta, reason) =
         score_of(DiscardPayoffPolicy.verdict(&ctx(&st, &candidate, &decision, &context, &config)));
 
     assert_eq!(reason.kind, "discard_payoff_engine_active");
+    assert!(
+        delta > 0.0,
+        "a guaranteed composite discard must earn positive credit, got {delta}"
+    );
 }
 
 #[test]
@@ -554,10 +558,11 @@ fn one_of_cost_with_only_discard_branches_is_credited_at_the_live_seam() {
     let context = context(&config, session(0.8));
     let candidate = activate(outlet, 0);
     let decision = priority_decision(&candidate);
-    let (_, reason) =
+    let (delta, reason) =
         score_of(DiscardPayoffPolicy.verdict(&ctx(&st, &candidate, &decision, &context, &config)));
 
     assert_eq!(reason.kind, "discard_payoff_engine_active");
+    assert!(delta > 0.0, "expected positive credit, got {delta}");
 }
 
 #[test]
@@ -570,10 +575,11 @@ fn zero_count_discard_cost_is_not_credited() {
     let context = context(&config, session(0.8));
     let candidate = activate(outlet, 0);
     let decision = priority_decision(&candidate);
-    let (_, reason) =
+    let (delta, reason) =
         score_of(DiscardPayoffPolicy.verdict(&ctx(&st, &candidate, &decision, &context, &config)));
 
     assert_eq!(reason.kind, "discard_payoff_na");
+    assert_eq!(delta, 0.0);
 }
 
 #[test]
@@ -589,4 +595,93 @@ fn discard_cost_without_an_engine_is_neutral() {
         score_of(DiscardPayoffPolicy.verdict(&ctx(&st, &candidate, &decision, &context, &config)));
 
     assert_eq!(reason.kind, "discard_payoff_no_engine");
+}
+
+#[test]
+fn composite_wrapping_a_mixed_one_of_is_not_credited() {
+    // CR 601.2h + CR 118.12a: the composite is fully paid, but its discard sits
+    // inside a mixed `OneOf`, so the player can settle the cost without ever
+    // discarding. Recursion must carry the "not guaranteed" answer up through
+    // the composite rather than treating any nested discard as certain.
+    let mut st = state();
+    engine_on_battlefield(&mut st, Some(discarded_engine_trigger()));
+    let outlet = cost_paying_permanent(
+        &mut st,
+        AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Tap,
+                AbilityCost::OneOf {
+                    costs: vec![
+                        discard_cost(1),
+                        AbilityCost::PayLife {
+                            amount: QuantityExpr::Fixed { value: 2 },
+                        },
+                    ],
+                },
+            ],
+        },
+    );
+
+    let config = AiConfig::default();
+    let context = context(&config, session(0.8));
+    let candidate = activate(outlet, 0);
+    let decision = priority_decision(&candidate);
+    let (delta, reason) =
+        score_of(DiscardPayoffPolicy.verdict(&ctx(&st, &candidate, &decision, &context, &config)));
+
+    assert_eq!(reason.kind, "discard_payoff_na");
+    assert_eq!(delta, 0.0);
+}
+
+#[test]
+fn composite_wrapping_an_all_discard_one_of_is_credited() {
+    // The positive twin: nesting must not lose a guaranteed discard either.
+    // Every branch of the inner `OneOf` discards, so the composite does too.
+    let mut st = state();
+    engine_on_battlefield(&mut st, Some(discarded_engine_trigger()));
+    let outlet = cost_paying_permanent(
+        &mut st,
+        AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Tap,
+                AbilityCost::OneOf {
+                    costs: vec![discard_cost(1), discard_cost(2)],
+                },
+            ],
+        },
+    );
+
+    let config = AiConfig::default();
+    let context = context(&config, session(0.8));
+    let candidate = activate(outlet, 0);
+    let decision = priority_decision(&candidate);
+    let (delta, reason) =
+        score_of(DiscardPayoffPolicy.verdict(&ctx(&st, &candidate, &decision, &context, &config)));
+
+    assert_eq!(reason.kind, "discard_payoff_engine_active");
+    assert!(delta > 0.0);
+}
+
+#[test]
+fn empty_one_of_cost_is_not_credited() {
+    // Behavioral assertion, NOT a guard on `cost_discards`'s `!costs.is_empty()`
+    // precondition: an empty `OneOf` never reaches that walk, because the engine's
+    // `cost_categories()` gate reports no `Discards` category for a branch list
+    // with nothing in it. Verified by mutation — deleting the emptiness check
+    // leaves this green. It is kept because the OUTCOME is worth pinning (a cost
+    // that pays nothing must not be credited a discard) at whichever layer
+    // enforces it, but it must not be counted as covering that precondition.
+    let mut st = state();
+    engine_on_battlefield(&mut st, Some(discarded_engine_trigger()));
+    let outlet = cost_paying_permanent(&mut st, AbilityCost::OneOf { costs: Vec::new() });
+
+    let config = AiConfig::default();
+    let context = context(&config, session(0.8));
+    let candidate = activate(outlet, 0);
+    let decision = priority_decision(&candidate);
+    let (delta, reason) =
+        score_of(DiscardPayoffPolicy.verdict(&ctx(&st, &candidate, &decision, &context, &config)));
+
+    assert_eq!(reason.kind, "discard_payoff_na");
+    assert_eq!(delta, 0.0);
 }
