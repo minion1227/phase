@@ -39,13 +39,17 @@
 //! read high on both — Sol Ring plus Medallions is a real shell — and the axes
 //! stay independent.
 
-use engine::game::filter::matches_type_filter_against_face;
+use engine::game::filter::{matches_target_filter_against_face_scoped, FaceControllerScope};
+use engine::game::quantity::resolve_quantity;
 use engine::game::DeckEntry;
-use engine::types::ability::{ControllerRef, StaticDefinition, TargetFilter};
+use engine::types::ability::{QuantityExpr, StaticDefinition, TargetFilter};
 use engine::types::card::CardFace;
 use engine::types::card_type::CoreType;
+use engine::types::game_state::GameState;
+use engine::types::identifiers::ObjectId;
 use engine::types::mana::ManaCost;
-use engine::types::statics::{CostModifyMode, StaticMode};
+use engine::types::player::PlayerId;
+use engine::types::statics::CostModifyMode;
 
 use crate::features::commitment;
 
@@ -166,53 +170,96 @@ pub(crate) fn your_spell_discount_parts<'a>(
 /// CR 601.2f: the generic discount this one static gives to spells you cast, or
 /// `None` when it is not a board-wide reduction of your own spells.
 ///
-/// Mirrors the eligibility tests `casting::collect_battlefield_cost_modifiers` applies at
-/// cast time, so deck classification and the resolver agree by construction:
-/// `Reduce` mode only, never a `SelfRef` self-cost reduction, and never an
-/// opponent-scoped modifier.
+/// Eligibility is NOT re-derived here. `StaticDefinition::board_wide_cost_modifier`
+/// is the engine's single structural authority — the same one
+/// `casting::collect_battlefield_cost_modifiers` consumes at cast time — so
+/// `Minimum`, `SelfRef` (CR 113.6) and the caster scope are settled in one place
+/// and cannot drift between deck analysis and the resolver.
 fn your_spell_discount(def: &StaticDefinition) -> Option<u32> {
-    let StaticMode::ModifyCost {
-        mode: CostModifyMode::Reduce,
-        amount,
-        ..
-    } = &def.mode
-    else {
-        // `Raise` (Thalia) and `Minimum` (Trinisphere) are taxes, not discounts.
-        return None;
-    };
+    let modifier = def.board_wide_cost_modifier()?;
 
-    // CR 113.6: a `SelfRef` reduction is "this spell costs {N} less" — resolved
-    // by `apply_self_spell_cost_modifiers` for the spell being cast, and never
-    // applied from a battlefield permanent to other spells. It is a property of
-    // one card, not a deck-wide engine.
-    if matches!(def.affected, Some(TargetFilter::SelfRef)) {
+    // CR 601.2f: `Raise` (Thalia) is a tax, not a discount. `Minimum`
+    // (Trinisphere) never reaches here — the authority rejects it.
+    if !matches!(modifier.mode, CostModifyMode::Reduce) {
         return None;
     }
 
-    // CR 601.2f: caster scope. `Opponent` is a discount handed to the other
-    // side; only `You` and an unscoped modifier reduce spells you cast.
-    if let Some(TargetFilter::Typed(typed)) = &def.affected {
-        if matches!(typed.controller, Some(ControllerRef::Opponent)) {
-            return None;
-        }
+    // CR 601.2f: a modifier scoped to opponents' spells is a discount handed to
+    // the other side, not this deck's engine.
+    if !modifier.caster_scope.admits_own_controller() {
+        return None;
     }
 
-    // CR 118.7a: only the generic component of a cost can be reduced by a
-    // generic reduction, so the discount magnitude is `generic`. A reduction of
-    // zero generic mana (a purely colored `amount`) moves no cost here and is
-    // not counted as an engine.
-    //
-    // `dynamic_count` is deliberately NOT resolved here. A scaling reducer
-    // ("costs {1} less for each artifact you control") multiplies `generic` by a
-    // game-state quantity that is unknowable at deck-analysis time, so this
-    // reports the per-unit amount — one application's worth. That understates a
-    // scaling reducer's ceiling rather than inventing a multiplier, and on the
-    // live path `CostReductionPolicy` additionally caps the credited discount,
-    // so a large `amount` whose multiplier is currently zero cannot dominate.
+    generic_discount(modifier.amount)
+}
+
+/// CR 118.7a: only the generic component of a cost can be reduced by a generic
+/// reduction, so the magnitude is `generic`. A purely colored `amount` moves no
+/// generic cost and is not an engine.
+fn generic_discount(amount: &ManaCost) -> Option<u32> {
     let ManaCost::Cost { generic, .. } = amount else {
         return None;
     };
     (*generic > 0).then_some(*generic)
+}
+
+/// CR 601.2f: one discount a static would currently apply to its controller's
+/// spells, paired with the spells it applies to.
+pub(crate) struct LiveDiscount {
+    /// Generic mana removed per application, `dynamic_count` already resolved.
+    pub generic: u32,
+    /// `None` discounts every spell its controller casts.
+    pub spell_filter: Option<TargetFilter>,
+}
+
+/// CR 601.2f: the discounts `statics` would apply to their controller's spells
+/// **right now**, with every state-dependent term of the casting authority's
+/// eligibility resolved rather than assumed.
+///
+/// The deck-time [`your_spell_discount`] deliberately answers only the
+/// structural half, because a deck list has no game state. This is the live
+/// half, and it exists because the casting authority gates each modifier on two
+/// things a structural read cannot see (`casting::collect_battlefield_cost_modifiers`):
+///
+/// * `condition` — an "as long as" / "during your turn" gate. A candidate still
+///   in hand has not entered the battlefield, so a source-relative condition has
+///   no truthful answer yet; per CR 601.2f the modifier simply would not apply
+///   when it is false. This **fails off**: a conditional reducer earns no
+///   deployment credit rather than credit the AI cannot bank on.
+/// * `dynamic_count` — "for each [thing]" multiplier, resolved through the
+///   engine's `resolve_quantity` authority so this agrees with the resolver by
+///   construction. A multiplier of zero means the reducer currently discounts
+///   nothing and is skipped entirely.
+pub(crate) fn live_your_spell_discounts<'a>(
+    state: &GameState,
+    source: ObjectId,
+    controller: PlayerId,
+    statics: impl IntoIterator<Item = &'a StaticDefinition>,
+) -> Vec<LiveDiscount> {
+    statics
+        .into_iter()
+        .filter_map(|def| {
+            let per_application = your_spell_discount(def)?;
+            let modifier = def.board_wide_cost_modifier()?;
+            // CR 601.2f: an unevaluable gate fails off (see above).
+            if modifier.condition.is_some() {
+                return None;
+            }
+            let multiplier = match modifier.dynamic_count {
+                None => 1,
+                Some(qty) => {
+                    let expr = QuantityExpr::Ref { qty: qty.clone() };
+                    u32::try_from(resolve_quantity(state, &expr, controller, source).max(0))
+                        .unwrap_or(0)
+                }
+            };
+            let generic = per_application.saturating_mul(multiplier);
+            (generic > 0).then(|| LiveDiscount {
+                generic,
+                spell_filter: modifier.spell_filter.cloned(),
+            })
+        })
+        .collect()
 }
 
 /// The `spell_filter` of a qualifying reducer — `Some(None)` for "discounts
@@ -223,45 +270,29 @@ fn your_spell_discount(def: &StaticDefinition) -> Option<u32> {
 /// return type would force every caller to destructure a tuple it half-ignores.
 fn your_spell_discount_filter(def: &StaticDefinition) -> Option<Option<TargetFilter>> {
     your_spell_discount(def)?;
-    let StaticMode::ModifyCost { spell_filter, .. } = &def.mode else {
-        return None;
-    };
-    Some(spell_filter.clone())
+    Some(def.board_wide_cost_modifier()?.spell_filter.cloned())
 }
 
 /// CR 601.2f: would this reducer's `spell_filter` admit `face` as a discounted
 /// spell? `None` is an unfiltered reducer — it discounts everything you cast.
 ///
-/// Evaluated on the TYPE axis only, delegating every leaf to the engine's
-/// CR 205 authority (`matches_type_filter_against_face`). The caster axis is
-/// deliberately not re-checked here: `StaticDefinition.affected` already carried
-/// it in [`your_spell_discount`], which is exactly how
-/// `casting::collect_battlefield_cost_modifiers` splits the two.
+/// Delegates wholly to the engine's context-free `CardFace` authority
+/// (`matches_target_filter_against_face_scoped`), which owns CR 205 type
+/// semantics AND every context-free `FilterProp` (mana value, color, keyword,
+/// supertype) — so a color-, mana-value- or keyword-scoped reducer is matched
+/// rather than silently discarded, and a property that needs live state fails
+/// closed inside that authority instead of here.
 ///
-/// Anything this cannot verify — a `properties` predicate that needs live game
-/// state, or a filter variant outside the composition below — reports `false`,
-/// so an unreadable filter *undercounts* coverage and drives commitment DOWN.
-/// The axis fails off rather than claiming a discount the deck may not get.
+/// `FaceControllerScope::AssumeOwn` because the caster axis was already settled
+/// by `CostModifierCasterScope` in [`your_spell_discount`] — deck analysis asks
+/// only about the analyzing player's own list, which is exactly how
+/// `casting::collect_battlefield_cost_modifiers` splits the two checks.
 fn filter_admits_face(filter: Option<&TargetFilter>, face: &CardFace) -> bool {
-    let Some(filter) = filter else {
-        return true;
-    };
     match filter {
-        TargetFilter::Any => true,
-        TargetFilter::Typed(typed) => {
-            typed.properties.is_empty()
-                && typed
-                    .type_filters
-                    .iter()
-                    .all(|type_filter| matches_type_filter_against_face(face, type_filter))
+        None => true,
+        Some(filter) => {
+            matches_target_filter_against_face_scoped(face, filter, FaceControllerScope::AssumeOwn)
         }
-        TargetFilter::Or { filters } => filters
-            .iter()
-            .any(|inner| filter_admits_face(Some(inner), face)),
-        TargetFilter::And { filters } => filters
-            .iter()
-            .all(|inner| filter_admits_face(Some(inner), face)),
-        _ => false,
     }
 }
 

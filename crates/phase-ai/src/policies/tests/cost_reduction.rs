@@ -8,7 +8,10 @@ use std::sync::Arc;
 
 use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
 use engine::game::zones::create_object;
-use engine::types::ability::{ControllerRef, StaticDefinition, TargetFilter, TypedFilter};
+use engine::types::ability::{
+    ControllerRef, PlayerScope, QuantityRef, StaticCondition, StaticDefinition, TargetFilter,
+    TypeFilter, TypedFilter,
+};
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::format::FormatConfig;
@@ -434,5 +437,215 @@ fn registry_stays_silent_below_the_activation_floor() {
             .iter()
             .any(|(id, _)| *id == PolicyId::CostReduction),
         "policy must not contribute below its activation floor"
+    );
+}
+
+// ─── review #6743: live gating + spell_filter narrowing ──────────────────────
+
+/// A reducer whose `spell_filter` restricts it to one core type.
+fn typed_reducer_in_hand(
+    state: &mut GameState,
+    mana_value: u32,
+    only: TypeFilter,
+) -> (ObjectId, CardId) {
+    let mut def = StaticDefinition::new(StaticMode::ModifyCost {
+        mode: CostModifyMode::Reduce,
+        amount: generic(1),
+        spell_filter: Some(TargetFilter::Typed(TypedFilter {
+            type_filters: vec![only],
+            controller: Some(ControllerRef::You),
+            ..Default::default()
+        })),
+        dynamic_count: None,
+    });
+    def.affected = Some(TargetFilter::Typed(TypedFilter {
+        controller: Some(ControllerRef::You),
+        ..Default::default()
+    }));
+    hand_card(
+        state,
+        "Typed Reducer",
+        CoreType::Creature,
+        mana_value,
+        vec![def],
+    )
+}
+
+#[test]
+fn deploy_credit_counts_only_spells_the_reducer_discounts() {
+    // An artifact-only reducer with a grip of sorceries discounts nothing.
+    let mut st = state();
+    let (reducer, card) = typed_reducer_in_hand(&mut st, 2, TypeFilter::Artifact);
+    plain_spell_in_hand(&mut st, 3);
+    plain_spell_in_hand(&mut st, 4);
+
+    let config = AiConfig::default();
+    let context = context(&config, session(0.8));
+    let candidate = cast(reducer, card);
+    let decision = priority_decision(&candidate);
+    let (_, reason) =
+        score_of(CostReductionPolicy.verdict(&ctx(&st, &candidate, &decision, &context, &config)));
+
+    assert_eq!(reason.kind, "cost_reduction_no_future_casts");
+}
+
+#[test]
+fn deploy_credit_counts_matching_spells() {
+    // Same reducer, but the grip is artifacts — now it pays off.
+    let mut st = state();
+    let (reducer, card) = typed_reducer_in_hand(&mut st, 2, TypeFilter::Artifact);
+    hand_card(&mut st, "Artifact A", CoreType::Artifact, 3, Vec::new());
+    hand_card(&mut st, "Artifact B", CoreType::Artifact, 4, Vec::new());
+
+    let config = AiConfig::default();
+    let context = context(&config, session(0.8));
+    let candidate = cast(reducer, card);
+    let decision = priority_decision(&candidate);
+    let (delta, reason) =
+        score_of(CostReductionPolicy.verdict(&ctx(&st, &candidate, &decision, &context, &config)));
+
+    assert_eq!(reason.kind, "cost_reduction_deploy_engine");
+    assert!(delta > 0.0);
+}
+
+#[test]
+fn defer_penalty_does_not_fire_for_a_spell_the_reducer_cannot_reduce() {
+    // An artifact-only reducer must not penalize casting a sorcery.
+    let mut st = state();
+    typed_reducer_in_hand(&mut st, 2, TypeFilter::Artifact);
+    let (spell, card) = plain_spell_in_hand(&mut st, 4);
+
+    let config = AiConfig::default();
+    let context = context(&config, session(0.8));
+    let candidate = cast(spell, card);
+    let decision = priority_decision(&candidate);
+    let (delta, reason) =
+        score_of(CostReductionPolicy.verdict(&ctx(&st, &candidate, &decision, &context, &config)));
+
+    assert_eq!(reason.kind, "cost_reduction_na");
+    assert_eq!(delta, 0.0);
+}
+
+#[test]
+fn conditional_reducer_earns_no_deploy_credit() {
+    // CR 601.2f: an "as long as" gate has no truthful answer for a card still in
+    // hand, so the policy fails off rather than banking a discount it cannot
+    // guarantee. Mirrors the casting authority's condition gate.
+    let mut st = state();
+    let mut def = reduce_your_spells(1, CostModifyMode::Reduce);
+    def.condition = Some(StaticCondition::IsPresent {
+        filter: Some(TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Artifact],
+            controller: Some(ControllerRef::You),
+            ..Default::default()
+        })),
+    });
+    let (reducer, card) = hand_card(&mut st, "Conditional", CoreType::Creature, 2, vec![def]);
+    plain_spell_in_hand(&mut st, 3);
+
+    let config = AiConfig::default();
+    let context = context(&config, session(0.8));
+    let candidate = cast(reducer, card);
+    let decision = priority_decision(&candidate);
+    let (delta, reason) =
+        score_of(CostReductionPolicy.verdict(&ctx(&st, &candidate, &decision, &context, &config)));
+
+    assert_eq!(reason.kind, "cost_reduction_na");
+    assert_eq!(delta, 0.0);
+}
+
+#[test]
+fn zero_dynamic_multiplier_earns_no_deploy_credit() {
+    // "costs {1} less for each card in your hand" with the multiplier resolving
+    // to zero discounts nothing, so it must not be credited.
+    let mut st = state();
+    let mut def = reduce_your_spells(1, CostModifyMode::Reduce);
+    let StaticMode::ModifyCost {
+        ref mut dynamic_count,
+        ..
+    } = def.mode
+    else {
+        unreachable!("constructed as ModifyCost")
+    };
+    *dynamic_count = Some(QuantityRef::GraveyardSize {
+        player: PlayerScope::Controller,
+    });
+    let (reducer, card) = hand_card(&mut st, "Scaling", CoreType::Creature, 2, vec![def]);
+    plain_spell_in_hand(&mut st, 3);
+
+    let config = AiConfig::default();
+    let context = context(&config, session(0.8));
+    let candidate = cast(reducer, card);
+    let decision = priority_decision(&candidate);
+    let (delta, reason) =
+        score_of(CostReductionPolicy.verdict(&ctx(&st, &candidate, &decision, &context, &config)));
+
+    // Empty graveyard → multiplier 0 → no live discount at all.
+    assert_eq!(reason.kind, "cost_reduction_na");
+    assert_eq!(delta, 0.0);
+}
+
+#[test]
+fn positive_dynamic_multiplier_scales_the_deploy_credit() {
+    // The same scaling reducer with a stocked graveyard credits more than the
+    // per-unit amount, matching the multiplier the resolver would apply.
+    let mut flat = state();
+    let (flat_reducer, flat_card) = reducer_in_hand(&mut flat, 2);
+    plain_spell_in_hand(&mut flat, 3);
+
+    let mut scaled = state();
+    let mut def = reduce_your_spells(1, CostModifyMode::Reduce);
+    let StaticMode::ModifyCost {
+        ref mut dynamic_count,
+        ..
+    } = def.mode
+    else {
+        unreachable!("constructed as ModifyCost")
+    };
+    *dynamic_count = Some(QuantityRef::GraveyardSize {
+        player: PlayerScope::Controller,
+    });
+    let (scaled_reducer, scaled_card) =
+        hand_card(&mut scaled, "Scaling", CoreType::Creature, 2, vec![def]);
+    plain_spell_in_hand(&mut scaled, 3);
+    for _ in 0..3 {
+        let cid = CardId(scaled.next_object_id);
+        let id = create_object(
+            &mut scaled,
+            cid,
+            AI,
+            "Dead Card".to_string(),
+            Zone::Graveyard,
+        );
+        scaled.players[AI.0 as usize].graveyard.push_back(id);
+    }
+
+    let config = AiConfig::default();
+    let context = context(&config, session(0.8));
+
+    let flat_candidate = cast(flat_reducer, flat_card);
+    let flat_decision = priority_decision(&flat_candidate);
+    let (flat_delta, _) = score_of(CostReductionPolicy.verdict(&ctx(
+        &flat,
+        &flat_candidate,
+        &flat_decision,
+        &context,
+        &config,
+    )));
+
+    let scaled_candidate = cast(scaled_reducer, scaled_card);
+    let scaled_decision = priority_decision(&scaled_candidate);
+    let (scaled_delta, reason) = score_of(CostReductionPolicy.verdict(&ctx(
+        &scaled,
+        &scaled_candidate,
+        &scaled_decision,
+        &context,
+        &config,
+    )));
+
+    assert_eq!(reason.kind, "cost_reduction_deploy_engine");
+    assert!(
+        scaled_delta > flat_delta,
+        "multiplier>1 must out-score the flat reducer: {scaled_delta} vs {flat_delta}"
     );
 }

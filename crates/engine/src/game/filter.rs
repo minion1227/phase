@@ -1269,29 +1269,154 @@ pub fn matches_target_filter_including_phased_out(
 /// face and yields `false`. Use the object-based `matches_target_filter` family
 /// instead whenever an `ObjectId` exists.
 pub(crate) fn matches_target_filter_against_face(face: &CardFace, filter: &TargetFilter) -> bool {
+    matches_target_filter_against_face_scoped(face, filter, FaceControllerScope::Reject)
+}
+
+/// CR 109.5: how a bare-`CardFace` match treats a filter's controller axis.
+///
+/// A face has no controller, so a controller-scoped filter is normally
+/// unanswerable. Some callers do know the answer out of band — deck analysis
+/// asks only about the analyzing player's own list, and a cost modifier's
+/// "spells YOU cast" scope is carried on `StaticDefinition.affected` and settled
+/// before the spell filter is consulted (see
+/// [`crate::types::ability::cost_modifier_caster_scope`]). This names which of
+/// those two situations the caller is in instead of leaving it implicit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FaceControllerScope {
+    /// The controller is genuinely unknown: any controller-scoped filter fails.
+    Reject,
+    /// The face is known to be the querying player's own card, so
+    /// `ControllerRef::You` is satisfied and `ControllerRef::Opponent` is not.
+    /// Any other `ControllerRef` remains unanswerable and fails.
+    AssumeOwn,
+}
+
+/// CR 205: Evaluate a `TargetFilter`'s STATIC characteristics against a bare
+/// `CardFace`, resolving the controller axis per `scope`.
+///
+/// `pub` so deck-time analysis outside this crate (`phase-ai`'s
+/// `features::cost_reduction`) can match a static's `spell_filter` against a
+/// bare face through this authority rather than re-deriving CR 205 semantics.
+pub fn matches_target_filter_against_face_scoped(
+    face: &CardFace,
+    filter: &TargetFilter,
+    scope: FaceControllerScope,
+) -> bool {
     match filter {
         TargetFilter::Any => true,
         TargetFilter::None => false,
         TargetFilter::Typed(typed) => {
-            typed.controller.is_none()
+            controller_ref_admits_face(typed.controller.as_ref(), scope)
                 && typed
                     .type_filters
                     .iter()
                     .all(|type_filter| matches_type_filter_against_face(face, type_filter))
-                && typed.properties.iter().all(|property| match property {
-                    FilterProp::HasSupertype { value } => face.card_type.supertypes.contains(value),
-                    _ => false,
-                })
+                && typed
+                    .properties
+                    .iter()
+                    // Fail closed: a property with no context-free reading (live
+                    // combat, counters, zone, chosen-value state) cannot be
+                    // satisfied by a face, so the whole filter does not match.
+                    .all(|property| context_free_prop_matches_face(face, property) == Some(true))
         }
         TargetFilter::Or { filters } => filters
             .iter()
-            .any(|inner| matches_target_filter_against_face(face, inner)),
+            .any(|inner| matches_target_filter_against_face_scoped(face, inner, scope)),
         TargetFilter::And { filters } => filters
             .iter()
-            .all(|inner| matches_target_filter_against_face(face, inner)),
-        TargetFilter::Not { filter } => !matches_target_filter_against_face(face, filter),
+            .all(|inner| matches_target_filter_against_face_scoped(face, inner, scope)),
+        TargetFilter::Not { filter } => {
+            !matches_target_filter_against_face_scoped(face, filter, scope)
+        }
         _ => false,
     }
+}
+
+/// CR 109.5: does this filter's controller scope admit a bare face?
+fn controller_ref_admits_face(
+    controller: Option<&ControllerRef>,
+    scope: FaceControllerScope,
+) -> bool {
+    matches!(
+        (controller, scope),
+        (None, _) | (Some(ControllerRef::You), FaceControllerScope::AssumeOwn)
+    )
+}
+
+/// CR 205 + CR 202: Evaluate one `FilterProp` against a bare `CardFace`.
+///
+/// `Some(true)` / `Some(false)` = the property has a context-free reading and
+/// this is it. `None` = the property needs a live object (battlefield state,
+/// counters, combat, zone, a value chosen earlier in a resolution) and therefore
+/// has NO answer for a face — callers must fail closed rather than guess.
+///
+/// Kept as an explicit allowlist, not a wildcard `_ => true`: a newly added
+/// `FilterProp` lands in the `None` arm and fails closed until someone decides
+/// whether it is context-free, which is the safe direction.
+pub fn context_free_prop_matches_face(face: &CardFace, prop: &FilterProp) -> Option<bool> {
+    match prop {
+        // CR 205.4a: printed supertype line.
+        FilterProp::HasSupertype { value } => Some(face.card_type.supertypes.contains(value)),
+        FilterProp::NotSupertype { value } => Some(!face.card_type.supertypes.contains(value)),
+        // CR 202.3: mana value is printed on the face. Only a fixed comparison
+        // is context-free — a dynamic quantity needs game state.
+        FilterProp::Cmc {
+            comparator,
+            value: QuantityExpr::Fixed { value },
+        } => Some(comparator.evaluate(
+            i32::try_from(face.mana_cost.mana_value()).unwrap_or(i32::MAX),
+            *value,
+        )),
+        // A dynamic mana-value comparison needs game state to resolve.
+        FilterProp::Cmc { .. } => None,
+        // CR 105.2 + CR 202.2: printed color, via the face's own color authority.
+        FilterProp::HasColor { color } => Some(face_colors(face).contains(color)),
+        FilterProp::NotColor { color } => Some(!face_colors(face).contains(color)),
+        FilterProp::ColorCount { comparator, count } => Some(comparator.evaluate(
+            i32::try_from(face_colors(face).len()).unwrap_or(i32::MAX),
+            i32::from(*count),
+        )),
+        // CR 702: printed keyword line.
+        FilterProp::WithKeyword { value } => Some(face.keywords.contains(value)),
+        FilterProp::WithoutKeyword { value } => Some(!face.keywords.contains(value)),
+        // CR 111.1 + CR 108.2: a bare face is a card definition, never a token.
+        FilterProp::Token => Some(false),
+        FilterProp::NonToken | FilterProp::RepresentedByCard => Some(true),
+        // Recursive combinators inherit their operands' answerability.
+        FilterProp::Not { prop } => context_free_prop_matches_face(face, prop).map(|m| !m),
+        FilterProp::AnyOf { props } => props.iter().try_fold(false, |acc, inner| {
+            context_free_prop_matches_face(face, inner).map(|m| acc || m)
+        }),
+        // Everything else reads live state and has no face-level answer.
+        _ => None,
+    }
+}
+
+/// CR 105.2 + CR 202.2: the colors of a bare face — an explicit color-defining
+/// override when present (CR 604.3), otherwise the printed mana cost.
+fn face_colors(face: &CardFace) -> Vec<ManaColor> {
+    if let Some(colors) = &face.color_override {
+        return colors.clone();
+    }
+    [
+        ManaColor::White,
+        ManaColor::Blue,
+        ManaColor::Black,
+        ManaColor::Red,
+        ManaColor::Green,
+    ]
+    .into_iter()
+    .filter(|color| match &face.mana_cost {
+        ManaCost::Cost { shards, .. } => shards.iter().any(|shard| shard.contributes_to(*color)),
+        // CR 202.1: no printed mana cost, so no color from one. The `Self*`
+        // forms are cost REFERENCES resolved against a live object (CR 202.3b),
+        // not a printed cost, so a bare face has no colors to read from them.
+        ManaCost::NoCost
+        | ManaCost::SelfManaCost
+        | ManaCost::SelfManaValue
+        | ManaCost::SelfManaCostReduced { .. } => false,
+    })
+    .collect()
 }
 
 /// CR 205: Evaluate a single `TypeFilter` against a bare `CardFace`'s printed

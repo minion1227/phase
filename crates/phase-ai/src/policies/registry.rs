@@ -144,8 +144,10 @@ pub enum PolicyId {
     CombatWithdrawal,
     /// CR 608.2c: "return a land you control" self-bounce target choice.
     SelfBounceTarget,
-    /// CR 121.1: reward drawing into an on-battlefield "whenever you draw" engine.
+    /// CR 601.2f: deploy a "spells you cast cost less" engine before the spells
+    /// it discounts.
     CostReduction,
+    /// CR 121.1: reward drawing into an on-battlefield "whenever you draw" engine.
     DrawPayoff,
 }
 

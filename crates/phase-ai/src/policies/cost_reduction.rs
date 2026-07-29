@@ -22,12 +22,17 @@
 //! hand size and touches no battlefield sweep, no `find_legal_targets`, and no
 //! affordability query.
 
+use engine::game::filter::{matches_target_filter, FilterContext};
+use engine::types::ability::TargetFilter;
 use engine::types::card_type::CoreType;
 use engine::types::game_state::GameState;
 use engine::types::identifiers::ObjectId;
 use engine::types::player::PlayerId;
 
-use crate::features::cost_reduction::{your_spell_discount_parts, COST_REDUCTION_FLOOR};
+use crate::cast_facts::CastFacts;
+use crate::features::cost_reduction::{
+    live_your_spell_discounts, LiveDiscount, COST_REDUCTION_FLOOR,
+};
 use crate::features::DeckFeatures;
 
 use super::context::PolicyContext;
@@ -75,12 +80,21 @@ impl TacticalPolicy for CostReductionPolicy {
             return PolicyVerdict::neutral(PolicyReason::new("cost_reduction_na"));
         };
 
-        // Card-local first: does THIS candidate carry the discount engine?
-        let discount = your_spell_discount_parts(facts.object.static_definitions.iter_unchecked());
-        if discount > 0 {
-            // A discount only pays off on spells still to be cast. With an empty
-            // grip the reducer is a vanilla permanent this turn.
-            let future_casts = castable_cards_in_hand(ctx, Some(facts.object.id));
+        // Card-local first: does THIS candidate carry a discount engine that
+        // would actually be applying right now (condition and dynamic multiplier
+        // resolved, not assumed)?
+        let discounts = live_your_spell_discounts(
+            ctx.state,
+            facts.object.id,
+            ctx.ai_player,
+            facts.object.static_definitions.iter_unchecked(),
+        );
+        if !discounts.is_empty() {
+            // A discount only pays off on the spells it actually reduces, so
+            // count the grip through each reducer's own `spell_filter` rather
+            // than crediting every card in hand.
+            let discount: u32 = discounts.iter().map(|d| d.generic).sum();
+            let future_casts = discountable_cards_in_hand(ctx, &discounts, facts.object.id);
             if future_casts == 0 {
                 return PolicyVerdict::neutral(PolicyReason::new("cost_reduction_no_future_casts"));
             }
@@ -97,11 +111,13 @@ impl TacticalPolicy for CostReductionPolicy {
             );
         }
 
-        // Otherwise: are we casting past an unplayed reducer that is cheaper than
-        // this spell? Deploying the discount first is strictly better sequencing
-        // — the same shape as `RampTimingPolicy`'s `defer_to_ramp`. The mana-value
-        // gate keeps this to cases where the reducer plausibly fits first.
-        if hand_holds_cheaper_reducer(ctx, facts.mana_value, facts.object.id) {
+        // Otherwise: are we casting past an unplayed, cheaper reducer that would
+        // actually have discounted THIS spell? Deploying the discount first is
+        // strictly better sequencing — the same shape as
+        // `RampTimingPolicy::defer_to_ramp`. Both the mana-value gate and the
+        // spell-filter match are required, so a narrow reducer never penalizes a
+        // spell it cannot reduce.
+        if hand_holds_cheaper_reducer(ctx, &facts) {
             return PolicyVerdict::score(
                 ctx.config.policy_penalties.cost_reduction_defer_penalty,
                 PolicyReason::new("cost_reduction_defer_to_engine")
@@ -113,51 +129,89 @@ impl TacticalPolicy for CostReductionPolicy {
     }
 }
 
-/// Nonland cards in the AI's hand that a discount could still apply to,
-/// excluding `exclude` (the candidate itself, which is being spent now).
+/// CR 601.2f: does `filter` (a reducer's `spell_filter`; `None` = unfiltered)
+/// admit the object `id` as a spell it discounts?
 ///
-/// Lands are excluded because CR 305.1 land plays are not spells and are never
-/// discounted by a CR 601.2f cost reducer.
+/// Delegates to the engine's live object authority `matches_target_filter`, with
+/// the reducer as the filter source so a `ControllerRef::You` scope resolves
+/// against the reducer's controller exactly as it does at cast time.
+fn filter_admits_object(
+    ctx: &PolicyContext<'_>,
+    filter: Option<&TargetFilter>,
+    source: ObjectId,
+    id: ObjectId,
+) -> bool {
+    match filter {
+        None => true,
+        Some(filter) => matches_target_filter(
+            ctx.state,
+            id,
+            filter,
+            &FilterContext::from_source(ctx.state, source),
+        ),
+    }
+}
+
+/// Cards in the AI's hand that at least one of `discounts` would actually
+/// reduce, excluding `exclude` (the candidate itself, which is being spent now).
 ///
-/// This counts remaining casts, NOT the subset the reducer's `spell_filter`
-/// admits — narrowing per candidate would mean evaluating that filter against
-/// every card in hand inside the search inner loop. The narrowing is applied
-/// once per game instead: `CostReductionFeature::commitment` folds in the
-/// deck-wide fraction of cards the reducers actually discount, and the registry
-/// multiplies this verdict by that commitment via `activation`. So a deck whose
-/// reducers cover little of its own list is already scaled down here, and a
-/// reducer that covers nothing deactivates the policy outright.
-fn castable_cards_in_hand(ctx: &PolicyContext<'_>, exclude: Option<ObjectId>) -> u32 {
+/// Lands are excluded first because CR 305.1 land plays are not spells and are
+/// never discounted by a CR 601.2f cost reducer — and that check is far cheaper
+/// than a filter evaluation, so it runs before one.
+fn discountable_cards_in_hand(
+    ctx: &PolicyContext<'_>,
+    discounts: &[LiveDiscount],
+    exclude: ObjectId,
+) -> u32 {
     let Some(player) = ctx.state.players.get(ctx.ai_player.0 as usize) else {
         return 0;
     };
     player
         .hand
         .iter()
-        .filter(|id| Some(**id) != exclude)
+        .filter(|id| **id != exclude)
         .filter(|id| {
             ctx.state
                 .objects
                 .get(id)
                 .is_some_and(|obj| !obj.card_types.core_types.contains(&CoreType::Land))
         })
+        .filter(|id| {
+            discounts.iter().any(|discount| {
+                filter_admits_object(ctx, discount.spell_filter.as_ref(), exclude, **id)
+            })
+        })
         .count()
         .try_into()
         .unwrap_or(u32::MAX)
 }
 
-/// True when the AI's hand still holds a cost-reduction permanent whose mana
-/// value is strictly below `mana_value` — i.e. the engine could have been
-/// deployed instead of, and later alongside, this spell.
-fn hand_holds_cheaper_reducer(ctx: &PolicyContext<'_>, mana_value: u32, exclude: ObjectId) -> bool {
+/// True when the AI's hand still holds a live cost-reduction permanent that is
+/// cheaper than this spell AND would actually discount it — i.e. the engine
+/// could have been deployed first, to this very spell's benefit.
+fn hand_holds_cheaper_reducer(ctx: &PolicyContext<'_>, facts: &CastFacts<'_>) -> bool {
     let Some(player) = ctx.state.players.get(ctx.ai_player.0 as usize) else {
         return false;
     };
     player.hand.iter().any(|id| {
-        *id != exclude
+        *id != facts.object.id
             && ctx.state.objects.get(id).is_some_and(|obj| {
-                obj.effective_mana_value() < mana_value
-                    && your_spell_discount_parts(obj.static_definitions.iter_unchecked()) > 0
+                obj.effective_mana_value() < facts.mana_value
+                    && live_your_spell_discounts(
+                        ctx.state,
+                        *id,
+                        ctx.ai_player,
+                        obj.static_definitions.iter_unchecked(),
+                    )
+                    .iter()
+                    .any(|discount| {
+                        filter_admits_object(
+                            ctx,
+                            discount.spell_filter.as_ref(),
+                            *id,
+                            facts.object.id,
+                        )
+                    })
             })
     })
 }

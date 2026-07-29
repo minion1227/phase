@@ -3,11 +3,12 @@
 
 use engine::game::DeckEntry;
 use engine::types::ability::{
-    ControllerRef, FilterProp, StaticDefinition, TargetFilter, TypeFilter, TypedFilter,
+    Comparator, ControllerRef, FilterProp, QuantityExpr, StaticDefinition, TargetFilter,
+    TypeFilter, TypedFilter,
 };
 use engine::types::card::CardFace;
 use engine::types::card_type::{CardType, CoreType};
-use engine::types::mana::ManaCost;
+use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
 use engine::types::statics::{CostModifyMode, StaticMode};
 
 use crate::features::cost_reduction::*;
@@ -363,4 +364,137 @@ fn parts_predicate_sums_multiple_reducing_statics() {
 fn parts_predicate_reports_zero_for_non_reducer() {
     let f_card = undiscounted_spell("Bear");
     assert_eq!(your_spell_discount_parts(&f_card.static_abilities), 0);
+}
+
+// ─── review #6743: context-free `TypedFilter.properties` are now honored ──────
+//
+// Previously any nonempty `properties` list was discarded, so color-, mana-value-
+// and keyword-scoped reducers silently discounted nothing.
+
+/// A face with a real printed mana cost, so color and mana-value props resolve.
+fn costed_face(name: &str, core: CoreType, shards: Vec<ManaCostShard>, generic: u32) -> CardFace {
+    let mut f = face(name, core);
+    f.mana_cost = ManaCost::Cost { shards, generic };
+    f
+}
+
+fn prop_reducer(name: &str, props: Vec<FilterProp>) -> CardFace {
+    reducer(
+        name,
+        1,
+        CostModifyMode::Reduce,
+        Some(TargetFilter::Typed(TypedFilter {
+            properties: props,
+            controller: Some(ControllerRef::You),
+            ..Default::default()
+        })),
+    )
+}
+
+#[test]
+fn color_scoped_reducer_covers_matching_spells() {
+    // "White spells you cast cost {1} less" — CR 105.2 printed color.
+    let f = detect(&[
+        entry(
+            prop_reducer(
+                "Medallion",
+                vec![FilterProp::HasColor {
+                    color: ManaColor::White,
+                }],
+            ),
+            4,
+        ),
+        entry(
+            costed_face(
+                "White Spell",
+                CoreType::Instant,
+                vec![ManaCostShard::White],
+                1,
+            ),
+            20,
+        ),
+        entry(
+            costed_face("Red Spell", CoreType::Instant, vec![ManaCostShard::Red], 1),
+            12,
+        ),
+    ]);
+    assert_eq!(f.reducer_count, 4);
+    // Only the 20 white spells — the reducer itself is colorless here.
+    assert_eq!(f.discounted_count, 20);
+    assert!(
+        f.commitment > 0.0,
+        "color-scoped reducer must produce coverage"
+    );
+}
+
+#[test]
+fn mana_value_scoped_reducer_covers_matching_spells() {
+    // "Spells you cast with mana value 3 or greater cost {1} less" — CR 202.3.
+    let f = detect(&[
+        entry(
+            prop_reducer(
+                "Big Discount",
+                vec![FilterProp::Cmc {
+                    comparator: Comparator::GE,
+                    value: QuantityExpr::Fixed { value: 3 },
+                }],
+            ),
+            4,
+        ),
+        entry(costed_face("Expensive", CoreType::Sorcery, vec![], 4), 20),
+        entry(costed_face("Cheap", CoreType::Sorcery, vec![], 1), 12),
+    ]);
+    assert_eq!(f.reducer_count, 4);
+    assert_eq!(f.discounted_count, 20);
+}
+
+#[test]
+fn negated_color_prop_is_honored() {
+    let f = detect(&[
+        entry(
+            prop_reducer(
+                "Anti-White",
+                vec![FilterProp::NotColor {
+                    color: ManaColor::White,
+                }],
+            ),
+            4,
+        ),
+        entry(
+            costed_face(
+                "White Spell",
+                CoreType::Instant,
+                vec![ManaCostShard::White],
+                1,
+            ),
+            20,
+        ),
+        entry(
+            costed_face("Red Spell", CoreType::Instant, vec![ManaCostShard::Red], 1),
+            12,
+        ),
+    ]);
+    // The 12 red spells plus the 4 colorless reducers themselves.
+    assert_eq!(f.discounted_count, 16);
+}
+
+#[test]
+fn live_only_property_still_fails_closed() {
+    // A property with no context-free reading must NOT be assumed satisfied —
+    // it yields no coverage, so commitment collapses rather than over-claiming.
+    let f = detect(&[
+        entry(prop_reducer("Stateful", vec![FilterProp::Tapped]), 4),
+        entry(costed_face("Spell", CoreType::Instant, vec![], 2), 32),
+    ]);
+    assert_eq!(f.reducer_count, 4);
+    assert_eq!(f.discounted_count, 0);
+    assert_eq!(f.commitment, 0.0);
+}
+
+#[test]
+fn controller_scoped_spell_filter_is_admitted_for_own_deck() {
+    // Regression for the root defect: a `ControllerRef::You` spell filter — the
+    // shape nearly every real reducer uses — must not be rejected outright.
+    let f = detect(&deck(spell_reducer("Electromancer"), 4, 20, 12));
+    assert_eq!(f.discounted_count, 20);
 }
