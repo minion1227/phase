@@ -537,6 +537,30 @@ fn one_of_cost_is_not_credited_at_the_live_seam() {
 }
 
 #[test]
+fn one_of_cost_with_only_discard_branches_is_credited_at_the_live_seam() {
+    // CR 118.12a: only one branch is paid, but this ability discards no matter
+    // which branch is selected. It is therefore a guaranteed live discard,
+    // unlike the mixed discard-or-life sibling above.
+    let mut st = state();
+    engine_on_battlefield(&mut st, Some(discarded_engine_trigger()));
+    let outlet = cost_paying_permanent(
+        &mut st,
+        AbilityCost::OneOf {
+            costs: vec![discard_cost(1), discard_cost(2)],
+        },
+    );
+
+    let config = AiConfig::default();
+    let context = context(&config, session(0.8));
+    let candidate = activate(outlet, 0);
+    let decision = priority_decision(&candidate);
+    let (_, reason) =
+        score_of(DiscardPayoffPolicy.verdict(&ctx(&st, &candidate, &decision, &context, &config)));
+
+    assert_eq!(reason.kind, "discard_payoff_engine_active");
+}
+
+#[test]
 fn zero_count_discard_cost_is_not_credited() {
     let mut st = state();
     engine_on_battlefield(&mut st, Some(discarded_engine_trigger()));

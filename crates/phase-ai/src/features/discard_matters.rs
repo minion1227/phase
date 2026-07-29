@@ -253,13 +253,18 @@ fn cost_discards(cost: &AbilityCost, scope: AbilityScope, quantity: &DiscardQuan
         AbilityCost::Composite { costs } => costs
             .iter()
             .any(|inner| cost_discards(inner, scope, quantity)),
-        // CR 118.12a: only one branch is chosen, so the discard is possible but
-        // not certain.
+        // CR 118.12a: only one branch is chosen. A discard is guaranteed only
+        // when every legal branch discards; otherwise it is merely possible.
         AbilityCost::OneOf { costs } => {
-            matches!(scope, AbilityScope::Potential)
-                && costs
-                    .iter()
-                    .any(|inner| cost_discards(inner, scope, quantity))
+            !costs.is_empty()
+                && match scope {
+                    AbilityScope::Potential => costs
+                        .iter()
+                        .any(|inner| cost_discards(inner, scope, quantity)),
+                    AbilityScope::Unconditional => costs
+                        .iter()
+                        .all(|inner| cost_discards(inner, scope, quantity)),
+                }
         }
         AbilityCost::PerCounter { base, .. } => cost_discards(base, scope, quantity),
         // Every other cost form: defer to the engine's category authority rather
