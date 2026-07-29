@@ -9,6 +9,10 @@
 //!   simple enabler form (`u32` count). BOTH are live in the resolver
 //!   (`game/effects/discard.rs` and `game/effects/mod.rs`), so a classifier
 //!   that reads only one silently misses part of the class.
+//! - `AbilityCost::Discard { count, .. }` at `ability.rs:8309` — the rummaging
+//!   class (Wild Mongrel / Anje / flashback) spells its discard as a COST, not
+//!   an effect, so the source predicate reads both axes. Nesting is resolved
+//!   through the engine's `AbilityDefinition::cost_categories()` authority.
 //! - `TriggerMode::Discarded` at `crates/engine/src/types/triggers.rs:321` and
 //!   `TriggerMode::DiscardedAll` at `triggers.rs:322` (CR 701.9) — the payoffs.
 //! - `TriggerDefinition.valid_target` — used to keep only YOUR-discard engines,
@@ -50,7 +54,8 @@ use engine::game::ability_utils::ability_definition_supported;
 use engine::game::quantity::resolve_quantity;
 use engine::game::DeckEntry;
 use engine::types::ability::{
-    AbilityDefinition, Effect, QuantityExpr, TargetFilter, TriggerDefinition,
+    AbilityCost, AbilityDefinition, CostCategory, Effect, QuantityExpr, TargetFilter,
+    TriggerDefinition,
 };
 use engine::types::card_type::CoreType;
 use engine::types::game_state::GameState;
@@ -190,18 +195,80 @@ pub(crate) fn is_discard_source_parts<'a>(
     quantity: &DiscardQuantity<'_>,
 ) -> bool {
     abilities.into_iter().any(|ability| {
-        collect_scoped_effects(ability, scope)
-            .iter()
-            .any(|effect| match effect {
-                Effect::Discard { target, count, .. } => {
-                    discards_controller(target) && quantity.expr_is_satisfied(count)
-                }
-                Effect::DiscardCard { target, count } => {
-                    discards_controller(target) && quantity.fixed_is_satisfied(*count)
-                }
-                _ => false,
-            })
+        ability_cost_discards(ability, scope, quantity)
+            || collect_scoped_effects(ability, scope)
+                .iter()
+                .any(|effect| match effect {
+                    Effect::Discard { target, count, .. } => {
+                        discards_controller(target) && quantity.expr_is_satisfied(count)
+                    }
+                    Effect::DiscardCard { target, count } => {
+                        discards_controller(target) && quantity.fixed_is_satisfied(*count)
+                    }
+                    _ => false,
+                })
     })
+}
+
+/// CR 118.3 + CR 601.2h: does PAYING this ability's cost discard a card?
+///
+/// The rummaging class this axis exists for — Wild Mongrel, Anje Falkenrath,
+/// Faithless Looting's flashback — spells the discard as an `AbilityCost`, not as
+/// an `Effect`. Reading only the effect chain classifies none of them, so the
+/// shared source predicate has to look at both axes.
+///
+/// A discard COST has no target filter because it is always paid by the
+/// activating player, i.e. by you — there is no opponent-scoped cost to exclude
+/// the way there is for `Effect::Discard`.
+fn ability_cost_discards(
+    ability: &AbilityDefinition,
+    scope: AbilityScope,
+    quantity: &DiscardQuantity<'_>,
+) -> bool {
+    // Cheap gate through the engine's own cost-category authority, which already
+    // flattens `Composite`/`OneOf` nesting. If it says no discard exists
+    // anywhere in the tree, there is nothing to walk.
+    if !ability.cost_categories().contains(&CostCategory::Discards) {
+        return false;
+    }
+    ability
+        .cost
+        .as_ref()
+        .is_some_and(|cost| cost_discards(cost, scope, quantity))
+}
+
+/// Walk a cost tree for a discard the payer will actually make.
+///
+/// The `scope` distinction is the same one the effect walk uses, applied to
+/// costs: `Potential` asks "could paying this discard a card?", `Unconditional`
+/// asks "will it?". That matters for `AbilityCost::OneOf` (CR 118.12a) — a
+/// "discard a card OR pay 2 life" cost is a discard the deck can plan around,
+/// but NOT one a live candidate is committed to, so crediting it at the live
+/// seam would score a discard the player may never make.
+fn cost_discards(cost: &AbilityCost, scope: AbilityScope, quantity: &DiscardQuantity<'_>) -> bool {
+    match cost {
+        AbilityCost::Discard { count, .. } => quantity.expr_is_satisfied(count),
+        // CR 601.2h: every component of a composite cost is paid, so a discard
+        // anywhere inside it is guaranteed.
+        AbilityCost::Composite { costs } => costs
+            .iter()
+            .any(|inner| cost_discards(inner, scope, quantity)),
+        // CR 118.12a: only one branch is chosen, so the discard is possible but
+        // not certain.
+        AbilityCost::OneOf { costs } => {
+            matches!(scope, AbilityScope::Potential)
+                && costs
+                    .iter()
+                    .any(|inner| cost_discards(inner, scope, quantity))
+        }
+        AbilityCost::PerCounter { base, .. } => cost_discards(base, scope, quantity),
+        // Every other cost form: defer to the engine's category authority rather
+        // than enumerating here. That is deliberate — a newly added discarding
+        // cost variant is picked up automatically instead of being silently
+        // dropped by a stale match arm, and the count check it skips can only
+        // make this UNDER-credit, never over-credit.
+        other => other.categories().contains(&CostCategory::Discards),
+    }
 }
 
 /// CR 701.9: the triggers carry a "whenever you discard a card" engine — a

@@ -4,7 +4,8 @@
 use engine::game::DeckEntry;
 use engine::types::ability::CardSelectionMode;
 use engine::types::ability::{
-    AbilityDefinition, AbilityKind, Effect, QuantityExpr, TargetFilter, TriggerDefinition,
+    AbilityCost, AbilityDefinition, AbilityKind, DiscardSelfScope, Effect, QuantityExpr,
+    TargetFilter, TriggerDefinition,
 };
 use engine::types::card::CardFace;
 use engine::types::card_type::{CardType, CoreType};
@@ -329,4 +330,76 @@ fn lands_are_excluded_from_the_denominator() {
     ]);
     let without = detect(&deck(18, 5));
     assert_eq!(with_lands.commitment, without.commitment);
+}
+
+// ─── review #6786: the discard-as-COST path at deck time ────────────────────
+
+fn discard_cost(count: i32) -> AbilityCost {
+    AbilityCost::Discard {
+        count: QuantityExpr::Fixed { value: count },
+        filter: None,
+        selection: CardSelectionMode::Chosen,
+        self_scope: DiscardSelfScope::FromHand,
+    }
+}
+
+/// Wild Mongrel: an activated ability whose COST is the discard.
+fn cost_outlet(name: &str, cost: AbilityCost) -> CardFace {
+    let mut f = face(name, CoreType::Creature);
+    f.abilities = vec![AbilityDefinition::new(
+        AbilityKind::Activated,
+        Effect::GainLife {
+            amount: QuantityExpr::Fixed { value: 1 },
+            player: TargetFilter::Controller,
+        },
+    )
+    .cost(cost)];
+    f
+}
+
+#[test]
+fn detects_discard_cost_outlet() {
+    let f = detect(&[
+        entry(cost_outlet("Wild Mongrel", discard_cost(1)), 10),
+        entry(engine_card("Engine"), 4),
+        entry(vanilla("Filler"), 22),
+    ]);
+    assert_eq!(f.source_count, 10, "a discard COST must count as an outlet");
+    assert!(f.commitment >= DISCARD_MATTERS_FLOOR);
+}
+
+#[test]
+fn deck_time_counts_a_one_of_discard_cost() {
+    // Deck-time asks "could this discard?", so an optional branch still marks the
+    // card for archetype classification — the live seam is the strict one.
+    let f = detect(&[
+        entry(
+            cost_outlet(
+                "Optional Outlet",
+                AbilityCost::OneOf {
+                    costs: vec![
+                        discard_cost(1),
+                        AbilityCost::PayLife {
+                            amount: QuantityExpr::Fixed { value: 2 },
+                        },
+                    ],
+                },
+            ),
+            10,
+        ),
+        entry(engine_card("Engine"), 4),
+        entry(vanilla("Filler"), 22),
+    ]);
+    assert_eq!(f.source_count, 10);
+}
+
+#[test]
+fn zero_count_discard_cost_is_still_a_deck_time_outlet() {
+    // `DiscardQuantity::Any` at deck time: the count is unknowable when building.
+    let f = detect(&[
+        entry(cost_outlet("Weird", discard_cost(0)), 10),
+        entry(engine_card("Engine"), 4),
+        entry(vanilla("Filler"), 22),
+    ]);
+    assert_eq!(f.source_count, 10);
 }

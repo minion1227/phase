@@ -9,8 +9,8 @@ use std::sync::Arc;
 use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
 use engine::game::zones::create_object;
 use engine::types::ability::{
-    AbilityDefinition, AbilityKind, CardSelectionMode, Effect, QuantityExpr, TargetFilter,
-    TriggerDefinition,
+    AbilityCost, AbilityDefinition, AbilityKind, CardSelectionMode, DiscardSelfScope, Effect,
+    QuantityExpr, TargetFilter, TriggerDefinition,
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
@@ -133,6 +133,37 @@ fn cast(object_id: ObjectId, card_id: CardId) -> CandidateAction {
         },
         metadata: ActionMetadata::for_actor(Some(AI), TacticalClass::Spell),
     }
+}
+
+/// The REAL Wild Mongrel / Anje shape: the discard is the ability's COST, not
+/// its effect. This is the class the axis exists for, and the effect-only
+/// classifier never reached it.
+fn discard_cost(count: i32) -> AbilityCost {
+    AbilityCost::Discard {
+        count: QuantityExpr::Fixed { value: count },
+        filter: None,
+        selection: CardSelectionMode::Chosen,
+        self_scope: DiscardSelfScope::FromHand,
+    }
+}
+
+/// A battlefield permanent whose activated ability PAYS `cost` and does
+/// something unrelated (pump) on resolution.
+fn cost_paying_permanent(state: &mut GameState, cost: AbilityCost) -> ObjectId {
+    let card_id = CardId(state.next_object_id);
+    let id = create_object(state, card_id, AI, "Mongrel".to_string(), Zone::Battlefield);
+    let obj = state.objects.get_mut(&id).unwrap();
+    obj.card_types.core_types.push(CoreType::Creature);
+    let ability = AbilityDefinition::new(
+        AbilityKind::Activated,
+        Effect::GainLife {
+            amount: QuantityExpr::Fixed { value: 1 },
+            player: TargetFilter::Controller,
+        },
+    )
+    .cost(cost);
+    Arc::make_mut(&mut obj.abilities).push(ability);
+    id
 }
 
 fn activate(source_id: ObjectId, ability_index: usize) -> CandidateAction {
@@ -428,4 +459,110 @@ fn registry_stays_silent_below_the_activation_floor() {
             .any(|(id, _)| *id == PolicyId::DiscardPayoff),
         "policy must not contribute below its activation floor"
     );
+}
+
+// ─── review #6786: the discard-as-COST path (the real rummaging class) ───────
+
+#[test]
+fn activated_discard_cost_outlet_is_credited() {
+    // The blocker this PR was returned for: Wild Mongrel pays `AbilityCost::
+    // Discard`, so the effect-only classifier scored it neutral even with a live
+    // engine out. Fails without the cost-axis classification.
+    let mut st = state();
+    engine_on_battlefield(&mut st, Some(discarded_engine_trigger()));
+    let outlet = cost_paying_permanent(&mut st, discard_cost(1));
+
+    let config = AiConfig::default();
+    let context = context(&config, session(0.8));
+    let candidate = activate(outlet, 0);
+    let decision = priority_decision(&candidate);
+    let (delta, reason) =
+        score_of(DiscardPayoffPolicy.verdict(&ctx(&st, &candidate, &decision, &context, &config)));
+
+    assert_eq!(reason.kind, "discard_payoff_engine_active");
+    assert!(delta > 0.0, "a discard COST must be credited, got {delta}");
+}
+
+#[test]
+fn composite_cost_containing_a_discard_is_credited() {
+    // CR 601.2h: every component of a composite cost is paid, so the discard is
+    // guaranteed — tap AND discard.
+    let mut st = state();
+    engine_on_battlefield(&mut st, Some(discarded_engine_trigger()));
+    let outlet = cost_paying_permanent(
+        &mut st,
+        AbilityCost::Composite {
+            costs: vec![AbilityCost::Tap, discard_cost(1)],
+        },
+    );
+
+    let config = AiConfig::default();
+    let context = context(&config, session(0.8));
+    let candidate = activate(outlet, 0);
+    let decision = priority_decision(&candidate);
+    let (_, reason) =
+        score_of(DiscardPayoffPolicy.verdict(&ctx(&st, &candidate, &decision, &context, &config)));
+
+    assert_eq!(reason.kind, "discard_payoff_engine_active");
+}
+
+#[test]
+fn one_of_cost_is_not_credited_at_the_live_seam() {
+    // CR 118.12a: only one branch is chosen. "Discard a card OR pay 2 life" is a
+    // discard the DECK can plan around, but not one this candidate is committed
+    // to — crediting it would score a discard the player may never make.
+    let mut st = state();
+    engine_on_battlefield(&mut st, Some(discarded_engine_trigger()));
+    let outlet = cost_paying_permanent(
+        &mut st,
+        AbilityCost::OneOf {
+            costs: vec![
+                discard_cost(1),
+                AbilityCost::PayLife {
+                    amount: QuantityExpr::Fixed { value: 2 },
+                },
+            ],
+        },
+    );
+
+    let config = AiConfig::default();
+    let context = context(&config, session(0.8));
+    let candidate = activate(outlet, 0);
+    let decision = priority_decision(&candidate);
+    let (delta, reason) =
+        score_of(DiscardPayoffPolicy.verdict(&ctx(&st, &candidate, &decision, &context, &config)));
+
+    assert_eq!(reason.kind, "discard_payoff_na");
+    assert_eq!(delta, 0.0);
+}
+
+#[test]
+fn zero_count_discard_cost_is_not_credited() {
+    let mut st = state();
+    engine_on_battlefield(&mut st, Some(discarded_engine_trigger()));
+    let outlet = cost_paying_permanent(&mut st, discard_cost(0));
+
+    let config = AiConfig::default();
+    let context = context(&config, session(0.8));
+    let candidate = activate(outlet, 0);
+    let decision = priority_decision(&candidate);
+    let (_, reason) =
+        score_of(DiscardPayoffPolicy.verdict(&ctx(&st, &candidate, &decision, &context, &config)));
+
+    assert_eq!(reason.kind, "discard_payoff_na");
+}
+
+#[test]
+fn discard_cost_without_an_engine_is_neutral() {
+    let mut st = state();
+    let outlet = cost_paying_permanent(&mut st, discard_cost(1));
+
+    let config = AiConfig::default();
+    let context = context(&config, session(0.8));
+    let candidate = activate(outlet, 0);
+    let decision = priority_decision(&candidate);
+    let (_, reason) =
+        score_of(DiscardPayoffPolicy.verdict(&ctx(&st, &candidate, &decision, &context, &config)));
+
+    assert_eq!(reason.kind, "discard_payoff_no_engine");
 }
