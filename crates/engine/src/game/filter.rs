@@ -1302,45 +1302,113 @@ pub fn matches_target_filter_against_face_scoped(
     filter: &TargetFilter,
     scope: FaceControllerScope,
 ) -> bool {
+    // Only a DEFINITE match admits the face. `None` (unknown) collapses to
+    // `false` here and nowhere earlier — collapsing it inside the recursion is
+    // what let an outer `Not` invert "unanswerable" into "matches".
+    target_filter_face_state(face, filter, scope) == Some(true)
+}
+
+/// Three-state evaluation of a `TargetFilter` against a bare `CardFace`.
+///
+/// `Some(true)`/`Some(false)` = definitely matches / definitely does not.
+/// `None` = the filter's answer depends on a live object that does not exist
+/// here, so there IS no answer.
+///
+/// The distinction is load-bearing under negation. Collapsing unknown to `false`
+/// before recursing means `Not(<unknown>)` reads as `true`, so a face would be
+/// admitted by a filter whose only predicate needs a live object. Threading the
+/// third state through `Typed`/`Or`/`And`/`Not` and collapsing once, at the
+/// boolean boundary, keeps the fail-closed contract intact at every depth.
+fn target_filter_face_state(
+    face: &CardFace,
+    filter: &TargetFilter,
+    scope: FaceControllerScope,
+) -> Option<bool> {
     match filter {
-        TargetFilter::Any => true,
-        TargetFilter::None => false,
+        TargetFilter::Any => Some(true),
+        TargetFilter::None => Some(false),
         TargetFilter::Typed(typed) => {
-            controller_ref_admits_face(typed.controller.as_ref(), scope)
-                && typed
+            let mut terms = vec![controller_ref_face_state(typed.controller.as_ref(), scope)];
+            terms.extend(
+                typed
                     .type_filters
                     .iter()
-                    .all(|type_filter| matches_type_filter_against_face(face, type_filter))
-                && typed
+                    // CR 205: the printed type line is always readable from a face.
+                    .map(|tf| Some(matches_type_filter_against_face(face, tf))),
+            );
+            terms.extend(
+                typed
                     .properties
                     .iter()
-                    // Fail closed: a property with no context-free reading (live
-                    // combat, counters, zone, chosen-value state) cannot be
-                    // satisfied by a face, so the whole filter does not match.
-                    .all(|property| context_free_prop_matches_face(face, property) == Some(true))
+                    .map(|property| context_free_prop_matches_face(face, property)),
+            );
+            kleene_and(terms)
         }
-        TargetFilter::Or { filters } => filters
-            .iter()
-            .any(|inner| matches_target_filter_against_face_scoped(face, inner, scope)),
-        TargetFilter::And { filters } => filters
-            .iter()
-            .all(|inner| matches_target_filter_against_face_scoped(face, inner, scope)),
+        TargetFilter::Or { filters } => kleene_or(
+            filters
+                .iter()
+                .map(|inner| target_filter_face_state(face, inner, scope)),
+        ),
+        TargetFilter::And { filters } => kleene_and(
+            filters
+                .iter()
+                .map(|inner| target_filter_face_state(face, inner, scope)),
+        ),
+        // Negating an unknown stays unknown — never `true`.
         TargetFilter::Not { filter } => {
-            !matches_target_filter_against_face_scoped(face, filter, scope)
+            target_filter_face_state(face, filter, scope).map(|matched| !matched)
         }
-        _ => false,
+        // Every remaining variant (`SelfRef`, player-scoped forms, event/LKI
+        // references) needs a live object or resolution context, so a bare face
+        // yields no answer rather than a definite `false` — otherwise an outer
+        // `Not` would turn "cannot tell" into "matches".
+        _ => None,
     }
 }
 
-/// CR 109.5: does this filter's controller scope admit a bare face?
-fn controller_ref_admits_face(
+/// Three-valued AND: any definite `false` wins; otherwise unknown poisons.
+fn kleene_and(terms: impl IntoIterator<Item = Option<bool>>) -> Option<bool> {
+    let mut saw_unknown = false;
+    for term in terms {
+        match term {
+            Some(false) => return Some(false),
+            Some(true) => {}
+            None => saw_unknown = true,
+        }
+    }
+    (!saw_unknown).then_some(true)
+}
+
+/// Three-valued OR: any definite `true` wins; otherwise unknown poisons.
+fn kleene_or(terms: impl IntoIterator<Item = Option<bool>>) -> Option<bool> {
+    let mut saw_unknown = false;
+    for term in terms {
+        match term {
+            Some(true) => return Some(true),
+            Some(false) => {}
+            None => saw_unknown = true,
+        }
+    }
+    (!saw_unknown).then_some(false)
+}
+
+/// CR 109.5: how a filter's controller scope reads against a bare face.
+///
+/// Unscoped is a definite match. Under `AssumeOwn` the caller has told us the
+/// face is the querying player's own card, so `You` is definitely satisfied and
+/// `Opponent` is definitely not. Everything else — a controller scope with no
+/// declared answer, or any scope at all under `Reject` — is genuinely unknown,
+/// NOT false, so that a surrounding `Not` cannot invert it into a match.
+fn controller_ref_face_state(
     controller: Option<&ControllerRef>,
     scope: FaceControllerScope,
-) -> bool {
-    matches!(
-        (controller, scope),
-        (None, _) | (Some(ControllerRef::You), FaceControllerScope::AssumeOwn)
-    )
+) -> Option<bool> {
+    match (controller, scope) {
+        (None, _) => Some(true),
+        (Some(ControllerRef::You), FaceControllerScope::AssumeOwn) => Some(true),
+        (Some(ControllerRef::Opponent), FaceControllerScope::AssumeOwn) => Some(false),
+        _ => None,
+    }
 }
 
 /// CR 205 + CR 202: Evaluate one `FilterProp` against a bare `CardFace`.
@@ -1393,12 +1461,14 @@ pub fn context_free_prop_matches_face(face: &CardFace, prop: &FilterProp) -> Opt
         // Recursive combinators inherit their operands' answerability. Negation
         // of an unknown stays unknown.
         FilterProp::Not { prop } => context_free_prop_matches_face(face, prop).map(|m| !m),
-        // CR 608.2b: three-valued (Kleene) OR. A definite `true` in ANY branch
-        // makes the disjunction true even when a sibling branch is unknowable
-        // from a face, so this must NOT short-circuit on the first `None` — the
-        // caller admits only `Some(true)`, and collapsing `[true, unknown]` to
-        // unknown would reject a spell filter that definitely matches.
-        // `None` is returned only when nothing is true AND something is unknown.
+        // Three-valued (Kleene) OR — ordinary Boolean semantics over the
+        // `Option<bool>` answer, not a rules behavior, so no CR governs it.
+        // A definite `true` in ANY branch makes the disjunction true even when a
+        // sibling branch is unknowable from a face, so this must NOT
+        // short-circuit on the first `None`: the caller admits only `Some(true)`,
+        // and collapsing `[true, unknown]` to unknown would reject a spell filter
+        // that definitely matches. `None` is returned only when nothing is true
+        // AND something is unknown.
         FilterProp::AnyOf { props } => {
             let mut saw_unknown = false;
             for inner in props {
@@ -12774,7 +12844,7 @@ mod tests {
         );
     }
 
-    // ─── CR 608.2b: three-valued OR in `context_free_prop_matches_face` ──────
+    // ─── three-valued OR in `context_free_prop_matches_face` ─────────────────
     //
     // Review #6743: `try_fold` short-circuited on the first `None`, so a
     // definite `Some(true)` alternative was collapsed to unknown and the typed
@@ -12918,6 +12988,157 @@ mod tests {
             context_free_prop_matches_face(&tri_state_face(), &prop),
             None,
             "negating an unknowable property cannot invent an answer"
+        );
+    }
+
+    // ─── unknown must survive outer negation (fail-closed at every depth) ────
+    //
+    // Review #6743: the recursion collapsed unknown to `false` inside `Typed`,
+    // so an outer `Not` inverted "cannot tell" into "matches" and admitted the
+    // wrong card class. These drive the production entry point.
+
+    fn typed_with(props: Vec<FilterProp>) -> TargetFilter {
+        TargetFilter::Typed(TypedFilter {
+            type_filters: vec![crate::types::ability::TypeFilter::Instant],
+            properties: props,
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn not_around_live_only_property_does_not_admit_a_face() {
+        // `Tapped` needs a battlefield object; `Not(Tapped)` must NOT be a match.
+        let filter = TargetFilter::Not {
+            filter: Box::new(typed_with(vec![unknown()])),
+        };
+        assert!(
+            !matches_target_filter_against_face_scoped(
+                &tri_state_face(),
+                &filter,
+                FaceControllerScope::AssumeOwn
+            ),
+            "negating an unanswerable property must not admit the face"
+        );
+    }
+
+    #[test]
+    fn not_around_unknown_controller_scope_does_not_admit_a_face() {
+        // Under `Reject` the controller is unknown, so `Not(controller-scoped)`
+        // is unknown too — not a match.
+        let filter = TargetFilter::Not {
+            filter: Box::new(TargetFilter::Typed(TypedFilter {
+                type_filters: vec![crate::types::ability::TypeFilter::Instant],
+                controller: Some(ControllerRef::You),
+                ..Default::default()
+            })),
+        };
+        assert!(
+            !matches_target_filter_against_face_scoped(
+                &tri_state_face(),
+                &filter,
+                FaceControllerScope::Reject
+            ),
+            "negating an unanswerable controller scope must not admit the face"
+        );
+    }
+
+    #[test]
+    fn not_around_a_definite_false_still_admits() {
+        // The fix must not over-correct: a DEFINITELY false inner filter still
+        // negates to a match.
+        let filter = TargetFilter::Not {
+            filter: Box::new(typed_with(vec![known_false()])),
+        };
+        assert!(
+            matches_target_filter_against_face_scoped(
+                &tri_state_face(),
+                &filter,
+                FaceControllerScope::AssumeOwn
+            ),
+            "negating a definite non-match must still admit the face"
+        );
+    }
+
+    #[test]
+    fn not_around_a_definite_true_rejects() {
+        let filter = TargetFilter::Not {
+            filter: Box::new(typed_with(vec![known_true()])),
+        };
+        assert!(!matches_target_filter_against_face_scoped(
+            &tri_state_face(),
+            &filter,
+            FaceControllerScope::AssumeOwn
+        ));
+    }
+
+    #[test]
+    fn not_around_an_unanswerable_filter_variant_does_not_admit() {
+        // `SelfRef` needs a resolution context; unknown, so `Not` is unknown.
+        let filter = TargetFilter::Not {
+            filter: Box::new(TargetFilter::SelfRef),
+        };
+        assert!(
+            !matches_target_filter_against_face_scoped(
+                &tri_state_face(),
+                &filter,
+                FaceControllerScope::AssumeOwn
+            ),
+            "an unanswerable filter variant must stay unknown under negation"
+        );
+    }
+
+    #[test]
+    fn opponent_scope_under_assume_own_is_definitely_false_not_unknown() {
+        // `AssumeOwn` states the face is the querying player's own card, so
+        // "controlled by an opponent" is definitely FALSE — and its negation is
+        // therefore a definite match.
+        let opponent = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![crate::types::ability::TypeFilter::Instant],
+            controller: Some(ControllerRef::Opponent),
+            ..Default::default()
+        });
+        assert!(!matches_target_filter_against_face_scoped(
+            &tri_state_face(),
+            &opponent,
+            FaceControllerScope::AssumeOwn
+        ));
+        assert!(
+            matches_target_filter_against_face_scoped(
+                &tri_state_face(),
+                &TargetFilter::Not {
+                    filter: Box::new(opponent)
+                },
+                FaceControllerScope::AssumeOwn
+            ),
+            "own-face knowledge makes the opponent scope definitely false, so \
+             its negation is a definite match"
+        );
+    }
+
+    #[test]
+    fn and_with_an_unknown_branch_does_not_admit() {
+        let filter = TargetFilter::And {
+            filters: vec![typed_with(vec![known_true()]), typed_with(vec![unknown()])],
+        };
+        assert!(!matches_target_filter_against_face_scoped(
+            &tri_state_face(),
+            &filter,
+            FaceControllerScope::AssumeOwn
+        ));
+    }
+
+    #[test]
+    fn or_with_a_definite_true_admits_despite_an_unknown_branch() {
+        let filter = TargetFilter::Or {
+            filters: vec![typed_with(vec![unknown()]), typed_with(vec![known_true()])],
+        };
+        assert!(
+            matches_target_filter_against_face_scoped(
+                &tri_state_face(),
+                &filter,
+                FaceControllerScope::AssumeOwn
+            ),
+            "a definitely-matching alternative admits even beside an unknown"
         );
     }
 }
