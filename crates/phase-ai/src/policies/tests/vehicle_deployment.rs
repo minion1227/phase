@@ -381,15 +381,18 @@ fn registry_stays_silent_for_a_subtype_only_vehicle() {
     let decision = priority_decision(&candidate);
     let verdicts =
         PolicyRegistry::default().verdicts(&ctx(&st, &candidate, &decision, &context, &config));
+    // `.expect`, not `if let` — the invariant is "registered AND routed AND
+    // neutral". Skipping the assertions when the policy is absent would let a
+    // routing regression (activation regressing to `None`) pass silently, which
+    // is the opposite of what this test claims to enforce.
     let found = verdicts
         .iter()
         .find(|(id, _)| *id == PolicyId::VehicleDeployment)
-        .map(|(_, v)| v.clone());
-    if let Some(verdict) = found {
-        let (delta, reason) = score_of(verdict);
-        assert_eq!(reason.kind, "vehicle_deployment_na");
-        assert_eq!(delta, 0.0);
-    }
+        .map(|(_, v)| v.clone())
+        .expect("VehicleDeploymentPolicy must be registered and routed for CastSpell");
+    let (delta, reason) = score_of(found);
+    assert_eq!(reason.kind, "vehicle_deployment_na");
+    assert_eq!(delta, 0.0);
 }
 
 // ─── review #6790 NB: the engine crew authorities must actually be consulted ──
