@@ -79,10 +79,11 @@ impl TacticalPolicy for VehicleDeploymentPolicy {
         if !matches!(ctx.candidate.action, GameAction::CastSpell { .. }) {
             return PolicyVerdict::neutral(PolicyReason::new("vehicle_deployment_na"));
         }
-        let Some(crew_cost) = crew_requirement_parts(
-            facts.object.keywords.iter(),
-            &facts.object.card_types.subtypes,
-        ) else {
+        // CR 702.122a: Crew is an ACTIVATED ABILITY. A Vehicle subtype without
+        // the keyword grants no crew ability, so it has no requirement to meet —
+        // routing through the strict authority keeps a `Crew 0` from being
+        // synthesised and trivially satisfied by an empty board.
+        let Some(crew_cost) = crew_requirement_parts(facts.object.keywords.iter()) else {
             return PolicyVerdict::neutral(PolicyReason::new("vehicle_deployment_na"));
         };
 

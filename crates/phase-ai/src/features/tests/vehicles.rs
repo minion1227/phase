@@ -126,6 +126,21 @@ fn variable_power_creature_is_not_counted() {
 }
 
 #[test]
+fn subtype_only_vehicle_has_no_crew_requirement() {
+    // CR 702.122a: Crew is an activated ability; the subtype does not grant it.
+    // Archetype membership is the broader question and stays true — see the
+    // sibling test below — but the live authority must report `None`.
+    let mut subtype_only = face("Odd Vehicle", CoreType::Artifact);
+    subtype_only.card_type.subtypes.push("Vehicle".to_string());
+    assert_eq!(crew_requirement(&subtype_only), None);
+    assert!(vehicle_archetype_member(&subtype_only));
+
+    let real = vehicle("Copter", 2);
+    assert_eq!(crew_requirement(&real), Some(2));
+    assert!(vehicle_archetype_member(&real));
+}
+
+#[test]
 fn vehicle_subtype_without_the_keyword_still_registers() {
     // A Vehicle whose crew keyword the parser has not attached is still part of
     // the archetype — it just contributes no crew cost.

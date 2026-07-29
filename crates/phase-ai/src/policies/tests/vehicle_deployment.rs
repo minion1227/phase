@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
 use engine::game::zones::create_object;
+use engine::types::ability::StaticDefinition;
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::format::FormatConfig;
@@ -12,6 +13,7 @@ use engine::types::game_state::{CastPaymentMode, GameState, WaitingFor};
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::keywords::Keyword;
 use engine::types::player::PlayerId;
+use engine::types::statics::{CrewAction, CrewContributionKind, StaticMode};
 use engine::types::zones::Zone;
 
 use crate::config::AiConfig;
@@ -327,4 +329,128 @@ fn registry_stays_silent_below_the_activation_floor() {
             .any(|(id, _)| *id == PolicyId::VehicleDeployment),
         "policy must not contribute below its activation floor"
     );
+}
+
+// ─── review #6790 blocker: a subtype-only Vehicle has no crew ability ───────
+
+/// A Vehicle by TYPE LINE only — no `Keyword::Crew`. CR 702.122a makes Crew an
+/// activated ability, which a subtype alone does not grant.
+fn subtype_only_vehicle_in_hand(state: &mut GameState) -> (ObjectId, CardId) {
+    let card_id = CardId(state.next_object_id);
+    let id = create_object(state, card_id, AI, "Odd Vehicle".to_string(), Zone::Hand);
+    let obj = state.objects.get_mut(&id).unwrap();
+    obj.card_types.core_types.push(CoreType::Artifact);
+    obj.card_types.subtypes.push("Vehicle".to_string());
+    state.players[AI.0 as usize].hand.push_back(id);
+    (id, card_id)
+}
+
+#[test]
+fn subtype_only_vehicle_is_not_applicable_on_an_empty_board() {
+    // The exact regression: a synthesised `Crew 0` satisfied `0 >= 0` and scored
+    // a live crew bonus for a permanent that can never be crewed.
+    let mut st = state();
+    let (obj, card) = subtype_only_vehicle_in_hand(&mut st);
+    let (delta, reason) = verdict_for(&st, obj, card, 0.8);
+    assert_eq!(reason.kind, "vehicle_deployment_na");
+    assert_eq!(delta, 0.0);
+}
+
+#[test]
+fn subtype_only_vehicle_is_not_applicable_with_a_full_board() {
+    // Same, with a board that WOULD satisfy any real crew cost — proving the
+    // rejection comes from the missing ability, not from an empty battlefield.
+    let mut st = state();
+    creature(&mut st, 5, AI);
+    creature(&mut st, 5, AI);
+    let (obj, card) = subtype_only_vehicle_in_hand(&mut st);
+    let (delta, reason) = verdict_for(&st, obj, card, 0.8);
+    assert_eq!(reason.kind, "vehicle_deployment_na");
+    assert_eq!(delta, 0.0);
+}
+
+#[test]
+fn registry_stays_silent_for_a_subtype_only_vehicle() {
+    // At the production seam, per the review: registered + routed, still neutral.
+    let mut st = state();
+    creature(&mut st, 5, AI);
+    let (obj, card) = subtype_only_vehicle_in_hand(&mut st);
+    let config = AiConfig::default();
+    let context = context(&config, session(0.8));
+    let candidate = cast(obj, card);
+    let decision = priority_decision(&candidate);
+    let verdicts =
+        PolicyRegistry::default().verdicts(&ctx(&st, &candidate, &decision, &context, &config));
+    let found = verdicts
+        .iter()
+        .find(|(id, _)| *id == PolicyId::VehicleDeployment)
+        .map(|(_, v)| v.clone());
+    if let Some(verdict) = found {
+        let (delta, reason) = score_of(verdict);
+        assert_eq!(reason.kind, "vehicle_deployment_na");
+        assert_eq!(delta, 0.0);
+    }
+}
+
+// ─── review #6790 NB: the engine crew authorities must actually be consulted ──
+
+/// Attach a static to a battlefield object.
+fn attach_static(state: &mut GameState, id: ObjectId, mode: StaticMode) {
+    let obj = state.objects.get_mut(&id).unwrap();
+    obj.static_definitions.push(StaticDefinition::new(mode));
+}
+
+#[test]
+fn cant_crew_creature_does_not_contribute() {
+    // CR 702.122d, via `object_has_cant_crew`. Without that call the 4-power body
+    // would cover Crew 3 and this would score.
+    let mut st = state();
+    let body = creature(&mut st, 4, AI);
+    attach_static(&mut st, body, StaticMode::CantCrew);
+    let (obj, card) = vehicle_in_hand(&mut st, 3);
+    let (delta, reason) = verdict_for(&st, obj, card, 0.8);
+    assert_eq!(reason.kind, "vehicle_deployment_uncrewable");
+    assert_eq!(delta, 0.0);
+}
+
+#[test]
+fn power_delta_contribution_is_honored() {
+    // CR 702.122a "as though its power were N greater", via
+    // `object_crew_power_contribution`. A raw `.power` sum would read 1 and call
+    // this uncrewable; the authority reads 3.
+    let mut st = state();
+    let body = creature(&mut st, 1, AI);
+    attach_static(
+        &mut st,
+        body,
+        StaticMode::CrewContribution {
+            kind: CrewContributionKind::PowerDelta { delta: 2 },
+            actions: vec![CrewAction::Crew],
+        },
+    );
+    let (obj, card) = vehicle_in_hand(&mut st, 3);
+    let (_, reason) = verdict_for(&st, obj, card, 0.8);
+    assert_eq!(
+        reason.kind, "vehicle_deployment_crewable",
+        "the engine's crew-power authority must be consulted, not raw power"
+    );
+}
+
+#[test]
+fn toughness_instead_of_power_contribution_is_honored() {
+    // CR 702.122a "using its toughness rather than its power".
+    let mut st = state();
+    let body = creature(&mut st, 1, AI);
+    st.objects.get_mut(&body).unwrap().toughness = Some(4);
+    attach_static(
+        &mut st,
+        body,
+        StaticMode::CrewContribution {
+            kind: CrewContributionKind::ToughnessInsteadOfPower,
+            actions: vec![CrewAction::Crew],
+        },
+    );
+    let (obj, card) = vehicle_in_hand(&mut st, 4);
+    let (_, reason) = verdict_for(&st, obj, card, 0.8);
+    assert_eq!(reason.kind, "vehicle_deployment_crewable");
 }

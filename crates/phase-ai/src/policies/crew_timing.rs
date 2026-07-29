@@ -41,10 +41,16 @@ impl TacticalPolicy for CrewTimingPolicy {
         // initial-Crew action self-gates in `verdict`, so a constant was safe,
         // but it applied identical weight in a dedicated Vehicles shell and in a
         // deck running one incidental Copter. `features::vehicles` now supplies
-        // that deck signal. The floor is deliberately NOT applied: crewing is
-        // still a real decision in a low-commitment deck, so the policy keeps
-        // firing at a reduced weight rather than switching off, and only a deck
-        // with no Vehicles at all (commitment 0.0) goes silent.
+        // that deck signal.
+        //
+        // A deck the axis scores at zero has no Vehicles at all, so there is no
+        // crew decision to weigh and the policy opts out. Above that, the weight
+        // is DAMPED rather than floored-out: crewing is still a real decision in
+        // a low-commitment deck, unlike the payoff policies which opt out below
+        // their floor entirely.
+        if features.vehicles.commitment <= 0.0 {
+            return None;
+        }
         Some(features.vehicles.commitment.max(MIN_CREW_ACTIVATION))
     }
 

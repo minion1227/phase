@@ -11,7 +11,9 @@
 //!   and is excluded rather than guessed.
 //! - Vehicle subtype via the shared `reanimator::VEHICLE_SUBTYPE` constant,
 //!   promoted rather than redefined so the two features cannot disagree about
-//!   what a Vehicle is.
+//!   what a Vehicle is. The subtype widens ARCHETYPE membership only — CR 702.122a
+//!   makes Crew an activated ability, so it never stands in for a crew
+//!   requirement at the live seam.
 //!
 //! No parser remediation required — every axis is expressible over existing
 //! typed AST.
@@ -105,9 +107,13 @@ pub fn detect(deck: &[DeckEntry]) -> VehiclesFeature {
             total_nonland = total_nonland.saturating_add(entry.count);
         }
 
-        if let Some(crew) = crew_requirement(face) {
+        if vehicle_archetype_member(face) {
             vehicle_count = vehicle_count.saturating_add(entry.count);
-            total_crew_cost = total_crew_cost.saturating_add(crew.saturating_mul(entry.count));
+            // Only a real `Keyword::Crew` contributes a cost — a subtype-only
+            // Vehicle joins the archetype but adds nothing to pay.
+            if let Some(crew) = crew_requirement(face) {
+                total_crew_cost = total_crew_cost.saturating_add(crew.saturating_mul(entry.count));
+            }
         }
 
         // CR 702.122a: a Vehicle taps OTHER creatures, so it can never crew
@@ -141,32 +147,44 @@ pub fn detect(deck: &[DeckEntry]) -> VehiclesFeature {
 /// parser has not attached is not silently dropped from the archetype — it just
 /// contributes no crew cost.
 pub(crate) fn crew_requirement(face: &CardFace) -> Option<u32> {
-    crew_requirement_parts(face.keywords.iter(), &face.card_type.subtypes)
+    crew_requirement_parts(face.keywords.iter())
 }
 
-/// Parts-based twin of [`crew_requirement`], for callers holding a live
-/// `GameObject` rather than a `CardFace`.
+/// CR 702.122a: the total power required to crew, or `None` when this object has
+/// no crew ability at all.
 ///
-/// Detection runs against the deck list (`CardFace.keywords`,
-/// `CardFace.card_type.subtypes`); the policy runs against the battlefield
-/// (`GameObject.keywords`, `GameObject.card_types.subtypes`). Same shapes,
-/// different field paths — passing the slices keeps ONE classifier instead of a
-/// deck-time and a live copy that could disagree about what a Vehicle is.
+/// Keyed STRICTLY on `Keyword::Crew`. CR 702.122a opens *"Crew is an activated
+/// ability of Vehicle cards"* — the printed subtype does not grant it. A
+/// subtype-only Vehicle therefore has no crew requirement to satisfy, and must
+/// not be reported as one: returning `Some(0)` here made `available >= required`
+/// true for an empty board (`0 >= 0`) and scored a live crew bonus for a
+/// permanent that can never be crewed.
+///
+/// Deck classification asks a different question and uses
+/// [`vehicle_archetype_member`] instead — see that function for why the subtype
+/// fallback is honest THERE and wrong here.
+///
+/// Parts-based so it classifies a deck-time `CardFace.keywords` slice and a live
+/// `GameObject.keywords` slice through one predicate.
 pub(crate) fn crew_requirement_parts<'a>(
     keywords: impl IntoIterator<Item = &'a Keyword>,
-    subtypes: &[String],
 ) -> Option<u32> {
-    let keyword_crew = keywords.into_iter().find_map(|keyword| match keyword {
+    keywords.into_iter().find_map(|keyword| match keyword {
         Keyword::Crew { power, .. } => Some(*power),
         _ => None,
-    });
-    if keyword_crew.is_some() {
-        return keyword_crew;
-    }
-    subtypes
-        .iter()
-        .any(|subtype| subtype.eq_ignore_ascii_case(VEHICLE_SUBTYPE))
-        .then_some(0)
+    })
+}
+
+/// Is this face part of the Vehicles ARCHETYPE?
+///
+/// Deliberately broader than [`crew_requirement`]: a Vehicle whose crew keyword
+/// the parser has not attached is still a Vehicle the deck is built around, and
+/// dropping it would understate the archetype. That fallback is safe for deck
+/// classification — it only decides how strongly the axis activates — and is NOT
+/// safe at the live seam, where it would invent a crew cost of zero for a
+/// permanent with no crew ability.
+pub(crate) fn vehicle_archetype_member(face: &CardFace) -> bool {
+    crew_requirement(face).is_some() || face_has_vehicle_subtype(face)
 }
 
 /// CR 205.3: the printed type line carries the Vehicle subtype.
