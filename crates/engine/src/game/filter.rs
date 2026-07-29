@@ -1390,11 +1390,26 @@ pub fn context_free_prop_matches_face(face: &CardFace, prop: &FilterProp) -> Opt
         // CR 111.1 + CR 108.2: a bare face is a card definition, never a token.
         FilterProp::Token => Some(false),
         FilterProp::NonToken | FilterProp::RepresentedByCard => Some(true),
-        // Recursive combinators inherit their operands' answerability.
+        // Recursive combinators inherit their operands' answerability. Negation
+        // of an unknown stays unknown.
         FilterProp::Not { prop } => context_free_prop_matches_face(face, prop).map(|m| !m),
-        FilterProp::AnyOf { props } => props.iter().try_fold(false, |acc, inner| {
-            context_free_prop_matches_face(face, inner).map(|m| acc || m)
-        }),
+        // CR 608.2b: three-valued (Kleene) OR. A definite `true` in ANY branch
+        // makes the disjunction true even when a sibling branch is unknowable
+        // from a face, so this must NOT short-circuit on the first `None` — the
+        // caller admits only `Some(true)`, and collapsing `[true, unknown]` to
+        // unknown would reject a spell filter that definitely matches.
+        // `None` is returned only when nothing is true AND something is unknown.
+        FilterProp::AnyOf { props } => {
+            let mut saw_unknown = false;
+            for inner in props {
+                match context_free_prop_matches_face(face, inner) {
+                    Some(true) => return Some(true),
+                    Some(false) => {}
+                    None => saw_unknown = true,
+                }
+            }
+            (!saw_unknown).then_some(false)
+        }
         // Everything else reads live state and has no face-level answer.
         _ => None,
     }
@@ -12756,6 +12771,153 @@ mod tests {
         assert_eq!(
             *prop, back,
             "ControllerMatches must round-trip through serde"
+        );
+    }
+
+    // ─── CR 608.2b: three-valued OR in `context_free_prop_matches_face` ──────
+    //
+    // Review #6743: `try_fold` short-circuited on the first `None`, so a
+    // definite `Some(true)` alternative was collapsed to unknown and the typed
+    // caller (which admits only `Some(true)`) rejected a filter that matches.
+
+    /// A face with a printed white mana cost, so color props are answerable.
+    fn tri_state_face() -> CardFace {
+        CardFace {
+            name: "Tri State Probe".to_string(),
+            card_type: crate::types::card_type::CardType {
+                supertypes: Vec::new(),
+                core_types: vec![CoreType::Instant],
+                subtypes: Vec::new(),
+            },
+            mana_cost: crate::types::mana::ManaCost::Cost {
+                shards: vec![crate::types::mana::ManaCostShard::White],
+                generic: 1,
+            },
+            ..Default::default()
+        }
+    }
+
+    /// Context-free and TRUE for `tri_state_face`.
+    fn known_true() -> FilterProp {
+        FilterProp::HasColor {
+            color: crate::types::mana::ManaColor::White,
+        }
+    }
+
+    /// Context-free and FALSE for `tri_state_face`.
+    fn known_false() -> FilterProp {
+        FilterProp::HasColor {
+            color: crate::types::mana::ManaColor::Red,
+        }
+    }
+
+    /// Live-state-only: unanswerable from a bare face.
+    fn unknown() -> FilterProp {
+        FilterProp::Tapped
+    }
+
+    #[test]
+    fn any_of_true_then_unknown_is_true() {
+        let prop = FilterProp::AnyOf {
+            props: vec![known_true(), unknown()],
+        };
+        assert_eq!(
+            context_free_prop_matches_face(&tri_state_face(), &prop),
+            Some(true),
+            "a definite match must survive a later unknowable alternative"
+        );
+    }
+
+    #[test]
+    fn any_of_unknown_then_true_is_true() {
+        // Order-sensitive twin: the old `try_fold` stopped at the leading `None`.
+        let prop = FilterProp::AnyOf {
+            props: vec![unknown(), known_true()],
+        };
+        assert_eq!(
+            context_free_prop_matches_face(&tri_state_face(), &prop),
+            Some(true),
+            "a leading unknown must not mask a definite later match"
+        );
+    }
+
+    #[test]
+    fn any_of_all_unknown_is_unknown() {
+        let prop = FilterProp::AnyOf {
+            props: vec![unknown(), unknown()],
+        };
+        assert_eq!(
+            context_free_prop_matches_face(&tri_state_face(), &prop),
+            None,
+            "nothing true and something unknown ⇒ unknown"
+        );
+    }
+
+    #[test]
+    fn any_of_false_plus_unknown_is_unknown() {
+        let prop = FilterProp::AnyOf {
+            props: vec![known_false(), unknown()],
+        };
+        assert_eq!(
+            context_free_prop_matches_face(&tri_state_face(), &prop),
+            None,
+            "a definite false does not resolve the unknown alternative"
+        );
+    }
+
+    #[test]
+    fn any_of_all_false_is_false() {
+        let prop = FilterProp::AnyOf {
+            props: vec![known_false(), known_false()],
+        };
+        assert_eq!(
+            context_free_prop_matches_face(&tri_state_face(), &prop),
+            Some(false),
+            "every alternative definitely false ⇒ definitely false"
+        );
+    }
+
+    #[test]
+    fn any_of_true_plus_false_is_true() {
+        let prop = FilterProp::AnyOf {
+            props: vec![known_false(), known_true()],
+        };
+        assert_eq!(
+            context_free_prop_matches_face(&tri_state_face(), &prop),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn tri_state_or_reaches_the_typed_filter_caller() {
+        // End-to-end through the production entry point: the typed caller admits
+        // only `Some(true)`, so the tri-state fix is what makes this match.
+        let filter = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![crate::types::ability::TypeFilter::Instant],
+            properties: vec![FilterProp::AnyOf {
+                props: vec![known_true(), unknown()],
+            }],
+            ..Default::default()
+        });
+        assert!(
+            matches_target_filter_against_face_scoped(
+                &tri_state_face(),
+                &filter,
+                FaceControllerScope::AssumeOwn
+            ),
+            "a definitely-matching alternative must admit the face"
+        );
+    }
+
+    #[test]
+    fn negation_of_unknown_stays_unknown() {
+        let prop = FilterProp::Not {
+            prop: Box::new(unknown()),
+        };
+        assert_eq!(
+            context_free_prop_matches_face(&tri_state_face(), &prop),
+            None,
+            "negating an unknowable property cannot invent an answer"
         );
     }
 }
